@@ -1,0 +1,2337 @@
+---
+title: "Retail_Reports"
+author: "Lisa Li"
+date: "5/20/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+rm(list=ls())
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r library all the files}
+library(RPostgreSQL)
+library(dplyr)
+library(dbplyr)
+library(data.table)
+library(lubridate)
+library(reshape2)
+library(stringr)
+library("readxl")
+library(writexl)
+library(openxlsx)
+library(tidyverse)
+```
+
+```{r daily database data pull}
+library(odbc)
+
+con.microsoft.sql <- DBI::dbConnect(odbc::odbc(),
+                      Driver   = "SQL Server",
+                      Server   = "52.86.56.66",
+                      Database = "BookXCenterProduction",
+                      UID      = "LisaLi",
+                      PWD      = "t4vUByNaANWqszXP",
+                      Port     =  1433)
+
+lpoo_list_sql <- dbSendQuery(con.microsoft.sql, "SELECT SUM(T.Quantity) AS Quantity, 
+                                                        SUM(T.OpenQuantity) AS OpenQuantity, 
+                                                        AVG(T.USDUnitPrice) AS USDUnitPrice,
+                                                        T.Isbn AS Isbn, 
+                                                        T.Wherehouse AS WhsCode, 
+                                                        T.Publisher AS Publisher,
+                                                        T.ShipDate AS ShipDate, 
+                                                        T.DueAtBXC,
+                                                        UPPER(T.BPName) AS BPName
+                                                   FROM BookXCenterProduction.SAP.LinePurchaseOrderView T
+                                                  WHERE T.Wherehouse IN ('AW', 'TR', 'TB', 'WW')
+                                               GROUP BY T.Isbn, 
+                                                        T.Wherehouse, 
+                                                        T.Publisher, 
+                                                        T.ShipDate,
+                                                        T.DueAtBXC,
+			                                                  T.BPName")
+lpoo_list <- dbFetch(lpoo_list_sql)
+
+
+asc_raw_data_sql <- dbSendQuery(con.microsoft.sql, "SELECT AVG(T1.YourPrice) AS ListingPrice, 
+                                                           SUM(T1.AfnTotalQuantity) AS AfnTotalQuantity, 
+	                                                         SUM(T1.AfnFulfillableQuantity) AS AfnFulfillableQuantity,
+	                                                         T1.Sku
+                                                      FROM BookXCenterProduction.Data.FbaManageInventories T1
+                                                     WHERE T1.AfnTotalQuantity <> 0 AND  T1.Condition = 'New'
+                                                  GROUP BY T1.Sku")
+asc_raw_data <- dbFetch(asc_raw_data_sql)
+
+## Not working use the download data
+# inventory_amz_path <- file.info(list.files("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Raw Data/Amazon_Raw/Manage_FBA_Inventory", full.names = T))
+# inventory_amz_name <- rownames(inventory_amz_path)[which.max(inventory_amz_path$mtime)]
+
+# inventory_amz_data <- read.csv(inventory_amz_name)
+
+# asc_raw_data <- inventory_amz_data %>% 
+#   select(your.price, afn.total.quantity, afn.fulfillable.quantity, sku) %>% 
+#   group_by(sku) %>% 
+#   summarise(ListingPrice = mean(your.price),
+#             AfnTotalQuantity = sum(afn.total.quantity),
+#            AfnFulfillableQuantity = sum(afn.fulfillable.quantity))
+
+# colnames(asc_raw_data) <- c("Sku", "ListingPrice", "AfnTotalQuantity", "AfnFulfillableQuantity")
+
+# asc_raw_data <- asc_raw_data[,c(2,3,4,1)]
+# asc_raw_data[,c(1:3)][is.na(asc_raw_data[,c(1:3)])] <- 0
+
+inventory_sap_sql <- dbSendQuery(con.microsoft.sql, "SELECT SUM(T2.OnHand) AS OnHand,
+	                                                          SUM(T2.Available) AS Available,
+	                                                          AVG(T2.UnitLandedCost) AS UnitLandedCost,
+	                                                          T2.ItemCode,
+                                                            T2.ItemName,
+	                                                          T2.WhsCode
+                                                       FROM BookXCenterProduction.SAP.InventoryReportView T2
+                                                      WHERE T2.WhsCode IN ('AW','03','WW','PPE','TB','TB-2','AWU','TR','FBM')
+                                                        AND T2.OnHand <> 0
+                                                   GROUP BY T2.ItemCode,
+                                                            T2.ItemName,
+	                                                          T2.WhsCode")
+inventory_sap <- dbFetch(inventory_sap_sql)
+
+
+all_listing <- dbSendQuery(con.microsoft.sql, "SELECT AVG(T3.Price) AS Price,
+                                                      T3.SellerSku, 
+	                                                    T3.Asin1,
+	                                                    CONVERT(VARCHAR(10), T3.OpenDate, 111) AS OpenDate
+                                                 FROM BookXCenterProduction.Data.AllListings T3
+                                             GROUP BY T3.SellerSku,
+                                                      T3.Asin1,
+		                                                  T3.OpenDate")
+all_listing_data <- dbFetch(all_listing)
+
+goodreceipt_sap_sql <- dbSendQuery(con.microsoft.sql, "SELECT SUM(T4.Quantity) AS Quantity,
+	                                                            AVG(T4.PriceAfterDisc) AS PriceAfterDisc, 
+	                                                            AVG(CASE WHEN T4.Currency IN ('$') THEN 1 
+	                                                                     WHEN T4.Currency NOT IN ('$') THEN T4.x_Rate END) AS Exchange_Rate,
+	                                                            T4.ISBN,
+                                                              T4.WarehouseCode, 
+	                                                            CONVERT(VARCHAR(10), T4.PostingDate, 111) AS PostingDate
+                                                         FROM BookXCenterProduction.SAP.GoodsReceiptReportView T4
+                                                        WHERE T4.WarehouseCode IN ('AW', 'AWU', '3', '5', 'TR', 'TB')
+                                                     GROUP BY T4.ISBN,
+                                                              T4.WarehouseCode,
+		                                                          T4.PostingDate")
+goodreceipt_sap <- dbFetch(goodreceipt_sap_sql)
+
+
+# invoice_sap_sql <- dbSendQuery(con.microsoft.sql, "SELECT * from BookXCenterProduction.SAP.AR_InvoiceReport")
+# invoice_sap <- dbFetch(invoice_sap_sql)
+
+# sale_line_sql <- dbSendQuery(con.microsoft.sql, "SELECT * from BookXCenterProduction.SAP.SaleOrderReportView")
+# sale_line <- dbFetch(sale_line_sql)
+
+```
+
+```{r list cleaning and classfication}
+# sku_list_org <- read_xlsx("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Raw Data/Gerneral_Raw/SKU_LIST_NEW.xlsx", sheet = 1)
+# sku_list_org$ISBN <- as.character(sku_list_org$ISBN)
+# library(odbc)
+
+# con.microsoft.sql <- DBI::dbConnect(odbc::odbc(),
+#                     Driver   = "SQL Server",
+#                     Server   = "52.86.56.66",
+#                     Database = "PROCUREMENTDB",
+#                     UID      = "LisaLi",
+#                     PWD      = "t4vUByNaANWqszXP",
+#                     Port     =  1433)
+#  dbWriteTable(con.microsoft.sql, DBI::SQL("Retail.SkuListOrg"), as.data.frame(sku_list_org), overwrite = TRUE)
+
+sku_list_org_sql <- dbSendQuery(con.microsoft.sql, "SELECT * FROM PROCUREMENTDB.Retail.SkuListOrg")
+sku_list_org<- dbFetch(sku_list_org_sql)
+
+# tr_list_org <- read_xlsx("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Raw Data/Gerneral_Raw/TR_LIST.xlsx", sheet = 1)
+colnames(sku_list_org) <- c("sku", "isbn")
+
+sku_list_org$isbn <- as.character(sku_list_org$isbn)
+sku_list_org$sku <- as.character(sku_list_org$sku)
+# tr_list <- as.list(as.character(tr_list_org$TR))
+
+# all_listing_path <- file.info(list.files("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Raw Data/Amazon_Raw/Listing_Raw", full.names = T))
+# all_listing_name <- rownames(all_listing_path)[which.max(all_listing_path$mtime)]
+
+# all_listing_data <- read.delim(all_listing_name)
+
+all_listing_data$OpenDate <- as.Date(all_listing_data$OpenDate)
+all_listing_data$SellerSku <- as.character(all_listing_data$SellerSku)
+tbl_vars(all_listing_data)
+			
+all_listing_data_class <- all_listing_data %>% 
+  full_join(sku_list_org, by = c(SellerSku = "sku")) %>% 
+  mutate(category = ifelse(startsWith(SellerSku, "103") & !startsWith(Asin1, "B") 
+                           |startsWith(SellerSku, "978") & str_detect(SellerSku, fixed("MFN"))
+                           |startsWith(SellerSku, "978") & str_detect(SellerSku, fixed("FBATRNEW")), "Trade Books",
+                                  ifelse(startsWith(SellerSku, "978") & str_detect(SellerSku, fixed("TB")), "Trouble Books", 
+                                         ifelse(str_detect(SellerSku, fixed("FBMPRIME")), "Prime Dealers",
+                                                ifelse(startsWith(Asin1, "B"),"PPE","Textbooks")))),
+         isbn_raw = ifelse(startsWith(SellerSku, "978"), substr(SellerSku, start = 1, stop = 13), isbn),
+         isbn_new = ifelse(is.na(isbn_raw), Asin1, isbn_raw)) 
+
+sku_list <- all_listing_data_class %>% 
+  select(SellerSku, isbn_new, category) %>% 
+  mutate(category = ifelse(is.na(category), "Textbooks", category)) 
+
+colnames(sku_list) <- c("sku","isbn","category")
+```
+
+```{r SKU list data writing}
+write_xlsx(list("SKU LIST" = sku_list), "C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Raw Data/Cleaned_List/isbn_listing_all.xlsx")
+
+library(odbc)
+library(DBI)
+
+con.microsoft.sql <- DBI::dbConnect(odbc::odbc(),
+                      Driver   = "SQL Server",
+                      Server   = "52.86.56.66",
+                      Database = "PROCUREMENTDB",
+                      UID      = "LisaLi",
+                      PWD      = "t4vUByNaANWqszXP",
+                      Port     =  1433)
+
+# dbWriteTable(con.microsoft.sql, DBI::SQL("Retail.FBAInventory"), as.data.frame(asc_raw_data), overwrite = TRUE)
+dbWriteTable(con.microsoft.sql, DBI::SQL("Retail.SkuListCategory"), as.data.frame(sku_list), overwrite = TRUE)
+# dbWriteTable(con.microsoft.sql, DBI::SQL("Retail.SkuListOrg"), as.data.frame(sku_list_org), overwrite = TRUE)
+```
+
+```{r inventory report - daily - data cleaning & data prepare}
+sap_raw_data <- inventory_sap
+
+# Find the latest file in the folder
+# asc_path <- file.info(list.files("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Raw Data/Amazon_Raw/Manage_FBA_Inventory", full.names = T))
+# asc_file_name <- rownames(asc_path)[which.max(asc_path$mtime)]
+# asc_raw_data <- read.csv(asc_file_name)
+
+tbl_vars(sap_raw_data)
+sap_data <- sap_raw_data %>% 
+  group_by(ItemCode, WhsCode) %>% 
+  summarise(in_stock = sum(OnHand)) %>% 
+  filter(ItemCode > 0,
+         WhsCode %in% c("AW", "TR"))
+
+colnames(sap_data) <- c("item_no","source","warehouse_instock")
+
+tbl_vars(asc_raw_data)
+## AWS Data Cleaning
+asc_data <- asc_raw_data %>% 
+  group_by(Sku) %>% 
+  summarise(amazon_instock = sum(AfnTotalQuantity),
+            amazon_instock_fulfillable = sum(AfnFulfillableQuantity)) %>% 
+  left_join(sku_list, by = c("Sku" = "sku")) %>% 
+  mutate(isbn_new = ifelse(is.na(isbn),substr(Sku, start = 1, stop = 13), isbn)) %>% 
+  filter(!isbn_new %in% Sku,
+         startsWith(isbn_new, "97")) %>% 
+  group_by(isbn_new, category) %>% 
+  summarise(amazon_instock = sum(amazon_instock),
+            amazon_instock_fulfillable = sum(amazon_instock_fulfillable)) %>% 
+  select(isbn_new, category, amazon_instock, amazon_instock_fulfillable)
+  
+
+## Line Purchase data clean
+lpoo_list_data <- lpoo_list %>% 
+  filter(WhsCode %in% c("AW", "TR"),
+         !`OpenQuantity` %in% 0) %>% 
+  group_by(Isbn, WhsCode) %>% 
+  summarise(open_quantity = sum(`OpenQuantity`)) 
+
+colnames(lpoo_list_data) <- c("item_no","source","open_quantity")
+
+lpoo_list_data$item_no <- as.character(lpoo_list_data$item_no)
+
+``` 
+
+```{r inventory report - daily - generator}
+lpoo_list_data_aw <- lpoo_list_data %>% 
+  filter(source %in% "AW")
+
+sap_data_aw <- sap_data %>% 
+  filter(source %in% "AW")
+
+asc_data_aw <- asc_data %>% 
+  filter(category %in% "Textbooks")
+
+inventory_report_aw <- asc_data_aw %>% 
+  full_join(lpoo_list_data_aw, by = c("isbn_new"="item_no")) %>% 
+  full_join(sap_data_aw, by = c("isbn_new"="item_no")) %>% 
+  select(isbn_new, amazon_instock, amazon_instock_fulfillable, warehouse_instock, open_quantity) %>% 
+  filter(startsWith(isbn_new, "97")) %>% 
+  ungroup()
+
+inventory_report_aw[,-1][is.na(inventory_report_aw[,-1])] <- 0
+
+inventory_report_aw <- inventory_report_aw %>% 
+  mutate(total_inventory = amazon_instock + warehouse_instock + open_quantity)
+
+lpoo_list_data_tr <- lpoo_list_data %>% 
+  filter(source %in% "TR")
+
+sap_data_tr <- sap_data %>% 
+  filter(source %in% "TR")
+
+asc_data_tr <- asc_data %>% 
+  filter(category %in% "Trade Books")
+
+inventory_report_tr <- asc_data_tr %>% 
+  full_join(lpoo_list_data_tr, by = c("isbn_new" = "item_no")) %>% 
+  full_join(sap_data_tr, by = c("isbn_new" = "item_no")) %>% 
+  select(isbn_new, amazon_instock, amazon_instock_fulfillable, warehouse_instock, open_quantity) %>% 
+  filter(startsWith(isbn_new, "97")) %>% 
+  ungroup()
+
+inventory_report_tr[,-1][is.na(inventory_report_tr[,-1])] <- 0
+
+inventory_report_tr <- inventory_report_tr %>% 
+  mutate(total_inventory = amazon_instock + warehouse_instock + open_quantity)
+
+```
+
+```{r inventory report - daily - internal}
+write_xlsx(list(`Textbooks_Inventory` = inventory_report_aw, 
+                `Trade_Books_Inventory` = inventory_report_tr),
+                 paste("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Reports/Inventory Report/Retail Internal/Inventory_Reports_Internal_", sep = "", today(), ".xlsx"))
+```
+
+```{r fifo data loading}
+fifo_data_sql <- dbSendQuery(con.microsoft.sql, "SELECT * FROM PROCUREMENTDB.Retail.FIFOTotal")
+fifo_data <- dbFetch(fifo_data_sql)
+
+fifo_data <- fifo_data %>% 
+  select(item_no, fifo_new) %>% 
+  filter(!is.na(item_no))
+
+colnames(fifo_data) <- c("item_no", "fifo")
+```
+
+```{r add fifo price for textbooks and trade books}
+# Textbooks
+inventory_report_aw_value <- inventory_report_aw %>% 
+  filter(warehouse_instock != 0 | amazon_instock != 0) %>% 
+  left_join(fifo_data, by = c("isbn_new"="item_no")) 
+
+inventory_report_aw_value[is.na(inventory_report_aw_value)] <- 0
+
+inventory_report_aw_value <- inventory_report_aw_value %>% 
+  mutate(instock_inventory = amazon_instock + warehouse_instock,
+         instock_value = instock_inventory*fifo) %>% 
+  select(isbn_new, instock_inventory, fifo, instock_value, warehouse_instock, amazon_instock)
+
+colnames(inventory_report_aw_value) <- c("item_no", "instock_inventory", "item_price", "instock_value", "warehouse_instock", "amazon_instock")
+
+# Trade books
+inventory_report_tr_value <- inventory_report_tr %>% 
+  filter(warehouse_instock != 0 | amazon_instock != 0) %>% 
+  left_join(fifo_data, by = c("isbn_new"="item_no")) 
+  
+inventory_report_tr_value[is.na(inventory_report_tr_value)] <- 0
+
+inventory_report_tr_value <- inventory_report_tr_value %>% 
+  mutate(instock_inventory = amazon_instock + warehouse_instock,
+         instock_value = instock_inventory*fifo) %>% 
+  select(isbn_new, instock_inventory, fifo, instock_value, warehouse_instock, amazon_instock)
+
+colnames(inventory_report_tr_value) <- c("item_no", "instock_inventory", "item_price", "instock_value", "warehouse_instock", "amazon_instock")
+
+
+inventory_report_aw_value$category <- "Textbooks"
+inventory_report_tr_value$category <- "Trade Books"
+```
+
+```{r trouble books inventory}
+troublebooks_inventory <- sap_raw_data %>% 
+  filter(WhsCode %in% c("TB","TB-2")) %>% 
+  select(ItemCode, OnHand, UnitLandedCost, WhsCode) %>% 
+  mutate(total_value = OnHand * UnitLandedCost)
+
+colnames(troublebooks_inventory) <- c("item_no", "instock_inventory", "item_price", "warehouse_code", "instock_value")
+
+troublebooks_inventory$warehouse_instock <- troublebooks_inventory$instock_inventory
+
+troublebooks_inventory$amazon_instock <- 0
+
+troublebooks_inventory <- troublebooks_inventory %>% 
+  mutate(category = ifelse(warehouse_code %in% "TB", "Trouble Books - New", "Trouble Books - Used"))
+
+troublebooks_inventory$warehouse_code <- NULL
+```
+
+```{r PPE inventory}
+tbl_vars(sap_raw_data)
+
+ppe_inventory <- sap_raw_data %>% 
+  filter(WhsCode %in% 'PPE') %>% 
+  select(ItemCode, OnHand, UnitLandedCost) %>% 
+  mutate(total_value = OnHand*UnitLandedCost)
+
+colnames(ppe_inventory) <- c("item_no", "instock_inventory", "item_price", "instock_value")
+
+ppe_inventory$warehouse_instock <- ppe_inventory$instock_inventory
+
+ppe_inventory$amazon_instock <- 0
+
+ppe_inventory$category <- "PPE"
+```
+
+```{r all in one data raw}
+inventory_total <- rbind(inventory_report_aw_value, inventory_report_tr_value, troublebooks_inventory, ppe_inventory)
+
+inventory_total$report_date <- Sys.Date()
+
+inventory_total <- inventory_sap %>% 
+  group_by(ItemCode, ItemName) %>% 
+  summarise(ncount_isbn = n()) %>% 
+  right_join(inventory_total, by = c("ItemCode" ="item_no")) 
+
+inventory_total <- inventory_total[,c(1,2,4:10)]
+
+colnames(inventory_total) <- c("item_no", "item_desc", "instock_inventory", "item_price", "instock_value","warehouse_instock", "amazon_instock", "category", "report_date")
+
+inventory_total$item_desc <- lapply(inventory_total$item_desc, tolower)
+
+CapStr <- function(y) {
+  c <- strsplit(y, " ")[[1]]
+  paste(toupper(substring(c, 1,1)), substring(c, 2),
+      sep="", collapse=" ")
+}
+
+inventory_total$item_desc <- sapply(inventory_total$item_desc, CapStr)
+
+inventory_total$item_desc <- gsub("NANA","", inventory_total$item_desc)
+```
+
+```{r open quantity}
+open_quantity <- lpoo_list %>% 
+  filter(WhsCode %in% c("AW","TR"),
+         !OpenQuantity %in% 0) %>% 
+  select(Isbn, WhsCode, OpenQuantity, DueAtBXC, USDUnitPrice, BPName, Publisher)
+
+open_quantity$DueAtBXC <- as.Date(format(open_quantity$DueAtBXC),"%Y-%m-%d")
+
+
+open_quantity <- open_quantity %>% 
+  mutate(Date_Diff = ymd(DueAtBXC) - ymd(Sys.Date()),
+         DeliveryDateGp = ifelse(Date_Diff > 0 & Date_Diff <= 7, "7 Days or Less", 
+                                 ifelse(Date_Diff > 7 & Date_Diff <=14, "8 -14 Days",
+                                        ifelse(Date_Diff > 14 & Date_Diff<= 30, "15 - 30 Days",
+                                               ifelse(Date_Diff > 30 & Date_Diff<= 60, "31 - 60 Days",
+                                                      ifelse(Date_Diff > 60, "60 Days or More", "Arrived"))))),
+         TotalValue = OpenQuantity*USDUnitPrice)
+
+
+open_quantity$ReportDate <- as.Date(format(Sys.Date()), "%Y-%m-%d")
+
+open_quantity$DeliveryDateGp <- as.character(open_quantity$DeliveryDateGp)
+
+open_quantity$Date_Diff <- as.numeric(open_quantity$Date_Diff)
+```
+
+```{r database inventory connection}
+# inventory_day_all_sql <- dbSendQuery(con.microsoft.sql, "SELECT * FROM PROCUREMENTDB.Retail.InventoryDayAll")
+# inventory_day_all_yest <- dbFetch(inventory_day_all_sql)
+
+inventory_day_all_yest <- read_xlsx("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Reports/Inventory Report/BookXchange Team/Inventory Report Raw/Inventory_Reports_Raw.xlsx", sheet = 1)
+
+inventory_total$month <- month(inventory_total$report_date)
+inventory_day_all <- rbind(inventory_day_all_yest, inventory_total)
+
+inventory_day_all$report_date <- as.Date(inventory_day_all$report_date)
+
+inventory_day_all$key <- paste(inventory_day_all$item_no, inventory_day_all$report_date, inventory_day_all$category, sep = "_")
+
+inventory_day_all <- inventory_day_all %>% 
+  arrange(report_date, item_no, instock_inventory) %>% 
+  distinct(key,.keep_all = TRUE)
+
+inventory_day_all$key <- NULL
+
+inventory_day_all_filter <- inventory_day_all %>% 
+  filter(month == month(Sys.Date()))
+```
+
+```{r team inventory folder files}
+write_xlsx(list(inventory_day_all = inventory_day_all), "C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Reports/Inventory Report/BookXchange Team/Inventory Report Raw/Inventory_Reports_Raw.xlsx")
+write_xlsx(list(`Open_Quantity` = open_quantity),"C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Reports/Inventory Report/BookXchange Team/Inventory Report Raw/Inventory_Reports_Raw_OQ.xlsx")
+
+library(odbc)
+library(DBI)
+
+con.microsoft.sql <- DBI::dbConnect(odbc::odbc(),
+                      Driver   = "SQL Server",
+                      Server   = "52.86.56.66",
+                      Database = "PROCUREMENTDB",
+                      UID      = "LisaLi",
+                      PWD      = "t4vUByNaANWqszXP",
+                      Port     =  1433)
+
+dbWriteTable(con.microsoft.sql, DBI::SQL("Retail.InventoryDayAll"), as.data.frame(inventory_day_all_filter), overwrite = TRUE)
+dbWriteTable(con.microsoft.sql, DBI::SQL("Retail.OpenQuantity"), as.data.frame(open_quantity), overwrite = TRUE)
+```
+
+```{r inventory report - data checking}
+aw_asc_check <- asc_data_aw %>% 
+  mutate(source = "AW") %>% 
+  group_by(source) %>% 
+  summarise(raw = sum(amazon_instock)) %>% 
+  select(raw)
+
+aw_sap_check <- sap_data_aw %>% 
+  group_by(source) %>% 
+  summarise(raw = sum(warehouse_instock)) %>% 
+  select(raw)
+
+aw_lpoo_check <- lpoo_list_data %>% 
+  filter(source %in% "AW") %>% 
+  group_by(source) %>% 
+  summarise(raw = sum(open_quantity)) %>% 
+  select(raw)
+
+aw_check <- rbind(aw_asc_check, aw_sap_check, aw_lpoo_check)
+
+aw_int_check <- as.data.frame(colSums(inventory_report_aw[,c(2,4,5)])) 
+
+colnames(aw_int_check) <- c("values")
+
+aw_check_f <- cbind(aw_check, aw_int_check) %>%
+  mutate(diff = raw - values)
+
+rownames(aw_check_f) <- c("fba_instock","warehouse_instock","open_quantity")
+
+tr_asc_check <- asc_data_tr %>% 
+  mutate(source = "TR") %>% 
+  group_by(source) %>% 
+  summarise(raw = sum(amazon_instock)) %>% 
+  select(raw)
+
+tr_sap_check <- sap_data_tr %>% 
+  group_by(source) %>% 
+  summarise(raw = sum(warehouse_instock)) %>% 
+  select(raw)
+
+tr_lpoo_check <- lpoo_list_data %>% 
+  filter(source %in% "TR") %>% 
+  group_by(source) %>% 
+  summarise(raw = sum(open_quantity)) %>% 
+  select(raw)
+
+tr_check <- rbind(tr_asc_check,tr_sap_check,tr_lpoo_check)
+
+tr_int_check <- as.data.frame(colSums(inventory_report_tr[,c(2,4,5)])) 
+
+colnames(tr_int_check) <- c("values")
+
+tr_check_f <- cbind(tr_check, tr_int_check) %>% 
+  mutate(diff = raw - values)
+
+rownames(tr_check_f) <- c("fba_instock","warehouse_instock","open_quantity")
+```
+
+```{r fifo calculations - Update Weekly}
+## Run this first if need to update FIFO for the weekly reports
+# isbns <- as.list(isbn_list)
+goodreceipt_sap_filter <- goodreceipt_sap %>% 
+  select(WarehouseCode, ISBN, Quantity, PostingDate, PriceAfterDisc, Exchange_Rate) %>% 
+  mutate(LandedCostUSD= round(PriceAfterDisc * Exchange_Rate,2)) %>% 
+  filter(!is.na(Quantity),
+         WarehouseCode %in% c("AW","3","5","TR","AWU"),
+         startsWith(ISBN, "97")) %>% 
+  select(WarehouseCode, ISBN, PostingDate, Quantity, LandedCostUSD)
+
+goodreceipt_sap_filter$PostingDate <- as.Date(goodreceipt_sap_filter$PostingDate)
+
+colnames(goodreceipt_sap_filter) <- c("Warehouse_Code", "ISBN", "Posting_Date", "Quantity", "Landed_Cost_USD")
+
+inventory_report_aw_value$item_no <- as.character(inventory_report_aw_value$item_no)
+inventory_report_tr_value$item_no <- as.character(inventory_report_tr_value$item_no)
+
+availability <- rbind(inventory_report_aw_value[,c(1,2)], inventory_report_tr_value[,c(1,2)]) 
+
+availability <- availability %>% 
+  group_by(item_no) %>% 
+  summarise(instock_inventory = sum(instock_inventory))
+
+sap_data_all <- inventory_sap %>%
+  filter(WhsCode %in% c("03", "WW", "TB")) %>%
+  group_by(ItemCode) %>% 
+  summarise(warehouse_instock = sum(OnHand))
+  
+  
+fifo_cost <- goodreceipt_sap_filter %>% 
+  left_join(availability, by = c("ISBN"= "item_no")) %>% 
+  left_join(sap_data_all, by = c("ISBN" = "ItemCode")) %>% 
+  mutate(Availability = ifelse(is.na(instock_inventory), warehouse_instock, instock_inventory)) %>% 
+  select(Warehouse_Code, ISBN, Posting_Date, Quantity, Landed_Cost_USD, Availability)
+
+# tr_reprice <- read_xlsx("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Raw Data/Cleaned_List/tr_reprice.xlsx", sheet = 1)
+# tr_reprice$`Item No.`<- as.character(tr_reprice$`Item No.`)
+# tbl_vars(tr_reprice)
+# tr_reprice <- tr_reprice %>% 
+#  mutate(Key = paste0(`Item No.`, sep = "_", `Posting Date`))
+
+# fifo_cost <- fifo_cost %>% 
+#  left_join(tr_reprice, by = "Key") %>% 
+#  mutate(Landed_Cost_USD = ifelse(Warehouse_Code %in% "TR" & !is.na(`Item No.`), `Landed Cost`, Landed_Cost_USD))
+
+fifo_cost[,6][is.na(fifo_cost[,6])] <- 0
+
+fifo_cost$Posting_Date <- as.Date(fifo_cost$Posting_Date)
+
+# Check Duplicates
+fifo_cost <- fifo_cost %>% 
+  group_by(ISBN, Warehouse_Code, Posting_Date) %>% 
+  summarise(Quantity = sum(Quantity),
+            Landed_Cost_USD = mean(Landed_Cost_USD),
+            Availability = sum(Availability)) %>% 
+  arrange(ISBN, Warehouse_Code, desc(Posting_Date))
+
+write.csv(fifo_cost, paste("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Raw Data/FIFO_Raw/FIFOCost_Raw_", sep = "", today(), ".csv"), row.names = FALSE)
+```
+
+```{r keepa raw data loading- Two Sources - Update Weekly}
+# Keepa data: sale sku & inventory sku
+
+isbn_sale_list <- as.data.frame(sku_list$isbn)
+colnames(isbn_sale_list) <- c("isbn")
+
+isbn_inventory_list <- as.data.frame(inventory_sap$ItemCode)
+colnames(isbn_inventory_list) <- c("isbn")
+
+isbn_list_op <- as.data.frame(lpoo_list_data$item_no)
+colnames(isbn_list_op) <- c("isbn")
+
+
+isbn_list <- rbind(isbn_sale_list, isbn_inventory_list, isbn_list_op)
+isbn_list <- unique(isbn_list)
+
+
+write.csv(isbn_list, "C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Raw Data/Cleaned_List/isbn_list.csv", row.names = FALSE)
+
+```
+
+```{r keepa list loading and data cleaning - missing isbns}
+# Load and download all the list from Keepa first
+keepa_data_path <- file.info(list.files("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Raw Data/Keepa_Raw/Missing ISBNs", full.names = T))
+keepa_data_name <- rownames(keepa_data_path)[which.max(keepa_data_path$mtime)]
+keepa_data <- read_xlsx(keepa_data_name)
+
+# This table includes all information veolcity + inventory + sale + buy box price
+tbl_vars(keepa_data)
+
+keepa_data <- keepa_data %>% 
+  select(`Product Codes: EAN`, ASIN, `Buy Box: Current`, `Buy Box: 30 days avg.`, `Sales Rank: Current`, `Publication Date`, `Buy Box Seller`, `New Offer Count: Current`, `FBA Fees:`)
+
+colnames(keepa_data) <- c("isbn", "asin", "buybox_current", "buybox_30day_avg", "sale_rank_current", "publication_date", "buy_box_seller", "new_offer_count", "FBA_fees")
+
+keepa_data$publication_date <- as.Date(keepa_data$publication_date)
+library(stringr)
+keepa_data <- str_split_fixed(keepa_data$isbn, ",", 5) %>% 
+  cbind(keepa_data)
+
+tbl_vars(keepa_data)
+
+colnames(keepa_data) <- c("V1","V2","V3","V4","V5","isbn", "asin", "buybox_current", "buybox_30day_avg", "sale_rank_current", "publication_date", "buy_box_seller", "new_offer_count", "FBA_fees")
+
+keepa_data <- keepa_data %>% 
+  mutate(isbn_new =  ifelse(startsWith(V2, " 97"), V2, 
+                            ifelse(startsWith(V3, " 97"), V3, 
+                                   ifelse(startsWith(V4, " 97"), V4,
+                                          ifelse(startsWith(V5, " 97"), V5, V1))))) %>% 
+  select("isbn_new", "asin", "buybox_current", "buybox_30day_avg", "sale_rank_current", "publication_date","buy_box_seller", "new_offer_count", "FBA_fees") 
+
+keepa_data$buybox_current <- as.numeric(gsub("[\\$,]", "",keepa_data$buybox_current))
+keepa_data$buybox_30day_avg <- as.numeric(gsub("[\\$,]", "",keepa_data$buybox_30day_avg))
+
+keepa_data$isbn_new <- trimws(keepa_data$isbn_new)
+
+keepa_data_missing <- keepa_data %>% 
+  arrange(buybox_30day_avg) %>% 
+  distinct(isbn_new,.keep_all = TRUE)
+```
+
+```{r keepa list loading and data cleaning - weekly isbns}
+# Load and download all the list from Keepa first
+keepa_data_path <- file.info(list.files("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Raw Data/Keepa_Raw/Weekly ISBNs", full.names = T))
+keepa_data_name <- rownames(keepa_data_path)[which.max(keepa_data_path$mtime)]
+keepa_data <- read_xlsx(keepa_data_name)
+
+# This table includes all information veolcity + inventory + sale + buy box price
+tbl_vars(keepa_data)
+
+keepa_data <- keepa_data %>% 
+  select(`Product Codes: EAN`, ASIN, `Buy Box: Current`, `Buy Box: 30 days avg.`, `Sales Rank: Current`, `Publication Date`, `Buy Box Seller`, `New Offer Count: Current`, `FBA Fees:`)
+
+colnames(keepa_data) <- c("isbn", "asin", "buybox_current", "buybox_30day_avg", "sale_rank_current", "publication_date", "buy_box_seller", "new_offer_count", "FBA_fees")
+
+keepa_data$publication_date <- as.Date(keepa_data$publication_date)
+library(stringr)
+keepa_data <- str_split_fixed(keepa_data$isbn, ",", 5) %>% 
+  cbind(keepa_data)
+
+tbl_vars(keepa_data)
+
+colnames(keepa_data) <- c("V1","V2","V3","V4","V5","isbn", "asin", "buybox_current", "buybox_30day_avg", "sale_rank_current", "publication_date", "buy_box_seller", "new_offer_count", "FBA_fees")
+
+keepa_data <- keepa_data %>% 
+  mutate(isbn_new =  ifelse(startsWith(V2, " 97"), V2, 
+                            ifelse(startsWith(V3, " 97"), V3, 
+                                   ifelse(startsWith(V4, " 97"), V4,
+                                          ifelse(startsWith(V5, " 97"), V5, V1))))) %>% 
+  select("isbn_new", "asin", "buybox_current", "buybox_30day_avg", "sale_rank_current", "publication_date","buy_box_seller", "new_offer_count", "FBA_fees") 
+
+keepa_data$buybox_current <- as.numeric(gsub("[\\$,]", "",keepa_data$buybox_current))
+keepa_data$buybox_30day_avg <- as.numeric(gsub("[\\$,]", "",keepa_data$buybox_30day_avg))
+
+keepa_data$isbn_new <- trimws(keepa_data$isbn_new)
+
+keepa_data <- keepa_data %>% 
+  arrange(buybox_30day_avg) %>% 
+  distinct(isbn_new,.keep_all = TRUE)
+```
+
+```{r keepa list loading and data cleaning - temp isbns}
+# Load and download all the list from Keepa first
+keepa_data_path <- file.info(list.files("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Raw Data/Keepa_Raw/Temp ISBNs", full.names = T))
+keepa_data_name <- rownames(keepa_data_path)[which.max(keepa_data_path$mtime)]
+keepa_data <- read_xlsx(keepa_data_name)
+
+# This table includes all information veolcity + inventory + sale + buy box price
+tbl_vars(keepa_data)
+
+keepa_data <- keepa_data %>% 
+  select(`Product Codes: EAN`, ASIN, `Buy Box: Current`, `Buy Box: 30 days avg.`, `Sales Rank: Current`, `Publication Date`, `Buy Box Seller`, `New Offer Count: Current`, Brand)
+
+colnames(keepa_data) <- c("isbn", "asin", "buybox_current", "buybox_30day_avg", "sale_rank_current", "publication_date", "buy_box_seller", "new_offer_count", "brand")
+
+keepa_data$publication_date <- as.Date(keepa_data$publication_date)
+library(stringr)
+keepa_data <- str_split_fixed(keepa_data$isbn, ",", 5) %>% 
+  cbind(keepa_data)
+
+tbl_vars(keepa_data)
+
+colnames(keepa_data) <- c("V1","V2","V3","V4","V5","isbn", "asin", "buybox_current", "buybox_30day_avg", "sale_rank_current", "publication_date", "buy_box_seller", "new_offer_count", "brand")
+
+keepa_data <- keepa_data %>% 
+  mutate(isbn_new =  ifelse(startsWith(V2, " 97"), V2, 
+                            ifelse(startsWith(V3, " 97"), V3, 
+                                   ifelse(startsWith(V4, " 97"), V4,
+                                          ifelse(startsWith(V5, " 97"), V5, V1))))) %>% 
+  select("isbn_new", "asin", "buybox_current", "buybox_30day_avg", "sale_rank_current", "publication_date","buy_box_seller", "new_offer_count", "brand") 
+
+keepa_data$buybox_current <- as.numeric(gsub("[\\$,]", "",keepa_data$buybox_current))
+keepa_data$buybox_30day_avg <- as.numeric(gsub("[\\$,]", "",keepa_data$buybox_30day_avg))
+
+keepa_data$isbn_new <- trimws(keepa_data$isbn_new)
+
+keepa_data_temp <- keepa_data %>% 
+  arrange(buybox_30day_avg) %>% 
+  distinct(isbn_new,.keep_all = TRUE)
+
+write.csv(keepa_data_seller, "C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Raw Data/Keepa_Raw/Temp ISBNs/temp2.csv")
+
+library(odbc)
+
+con.microsoft.sql <- DBI::dbConnect(odbc::odbc(),
+                      Driver   = "SQL Server",
+                      Server   = "52.86.56.66",
+                      Database = "PROCUREMENTDB",
+                      UID      = "LisaLi",
+                      PWD      = "t4vUByNaANWqszXP",
+                      Port     =  1433)
+
+top_seller_sql <- dbSendQuery(con.microsoft.sql, "SELECT G.ISBN
+                                                        ,G.BookType
+                                                  FROM PROCUREMENTDB.dbo.GoldenList G
+                                                  WHERE G.BookType IS NOT NULL
+                                                  GROUP BY G.ISBN, G.BookType")
+top_seller_list <- dbFetch(top_seller_sql)
+
+keepa_data_seller <- keepa_data_missing %>% 
+  left_join(top_seller_list, by = c("isbn_new" = "ISBN"))
+```
+
+```{r FIFO data cleaning and selection}
+fifo_report_path <- list.files("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Reports/FIFO Report", pattern="*.csv", full.names=TRUE)
+fifo_report_files <- lapply(fifo_report_path, read.csv, header=T, sep=",")
+
+for (i in 1:length(fifo_report_files)){fifo_report_files[[i]]<- cbind(fifo_report_files[[i]],fifo_report_path[i])}
+fifo_report_files_all <- do.call("rbind", fifo_report_files) 
+
+tbl_vars(fifo_report_files_all)
+
+fifo_report_files_all$`fifo_report_path[i]` <- gsub("^.*_", "", fifo_report_files_all$`fifo_report_path[i]`)
+fifo_report_files_all$`fifo_report_path[i]` <- gsub(".csv", "", fifo_report_files_all$`fifo_report_path[i]`)
+
+colnames(fifo_report_files_all) <- c("item_no", "fifo", "date")
+
+fifo_report_files_all$item_no <- as.character(fifo_report_files_all$item_no)
+fifo_report_files_all$date <- as.Date(fifo_report_files_all$date)
+fifo_report_files_all$fifo <- round(as.numeric(fifo_report_files_all$fifo),3)
+
+fifo_data <- fifo_report_files_all %>% 
+  group_by(item_no) %>%
+  slice(which.max(as.Date(date, '%m/%d/%Y')))
+
+fifo_data <- fifo_data[,c(1,2)]
+
+fifo_data$item_no <- as.character(fifo_data$item_no)
+
+fifo_data_fix <- fifo_data %>% 
+  left_join(keepa_data, by = c("item_no" = "isbn_new")) %>% 
+  select(item_no, fifo, buybox_30day_avg, buybox_current, asin) %>% 
+  full_join(keepa_data_missing, by = c("item_no" = "isbn_new")) 
+
+fifo_data_fix[,c(2:4,7:9,12)][is.na(fifo_data_fix[,c(2:4,7:9,12)])] <- 0
+
+fifo_data_fix <- fifo_data_fix %>%
+  mutate(breakeven = ifelse(buybox_30day_avg.x == 0 & buybox_30day_avg.y != 0, (0.85*buybox_30day_avg.y - 7)/1.25, 
+                            ifelse(buybox_30day_avg.x == 0 & buybox_30day_avg.y == 0, 10, (0.85*buybox_30day_avg.x - 7)/1.25)),
+         fifo_new = ifelse(fifo <= 15 & (breakeven - fifo) > 0, breakeven, fifo),
+         buybox_30day_avg = ifelse(buybox_30day_avg.x == 0, buybox_30day_avg.y, buybox_30day_avg.x),
+         buybox_current = ifelse(buybox_current.x == 0, buybox_current.y, buybox_current.x),
+         asin = ifelse(is.na(asin.x), asin.y, asin.x)) %>% 
+  select(item_no, asin, fifo_new, buybox_30day_avg, buybox_current)
+
+```
+
+```{r FIFO data writing}
+write_xlsx(list("FIFO Cost" = fifo_data_fix), "C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Reports/FIFO Report/FIFO Report.xlsx")
+
+library(odbc)
+library(DBI)
+
+con.microsoft.sql <- DBI::dbConnect(odbc::odbc(),
+                      Driver   = "SQL Server",
+                      Server   = "52.86.56.66",
+                      Database = "PROCUREMENTDB",
+                      UID      = "LisaLi",
+                      PWD      = "t4vUByNaANWqszXP",
+                      Port     =  1433)
+
+dbWriteTable(con.microsoft.sql, DBI::SQL("Retail.FIFOTotal"), as.data.frame(fifo_data_fix), overwrite = TRUE)
+```
+
+```{r amazon sales report - weekly - by SKU}
+sku_orders_wk_file <- list.files("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Raw Data/Amazon_Raw/SKU_Weekly_Manual_Raw", pattern="*.csv", full.names=TRUE)
+sku_orders_wk <- lapply(sku_orders_wk_file, read.csv, header=T, sep=",")
+for (i in 1:length(sku_orders_wk)){sku_orders_wk[[i]]<-cbind(sku_orders_wk[[i]],sku_orders_wk_file[i])}
+sku_orders_wk_all <- do.call("rbind", sku_orders_wk) 
+
+sku_orders_wk_all$`sku_orders_wk_file[i]` <- gsub("^.*_", "", sku_orders_wk_all$`sku_orders_wk_file[i]`)
+sku_orders_wk_all$`sku_orders_wk_file[i]` <- gsub(".csv", "", sku_orders_wk_all$`sku_orders_wk_file[i]`)
+tr_fees <- read_xlsx("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Raw Data/Cleaned_List/tr_fees.xlsx", sheet = 1)
+tr_fees$Isbn <- as.character(tr_fees$Isbn)
+```
+
+```{r amazon sales report - weekly - by SKU - data cleaning & preparing}
+fifo_data <- fifo_data_fix[,c("item_no", "fifo_new")]
+colnames(fifo_data) <- c("item_no", "fifo")
+
+# sku_list$isbn <- as.character(sku_list$isbn)
+sku_orders_wk_all$Ordered.Product.Sales = as.numeric(gsub("[//$,]", "", sku_orders_wk_all$Ordered.Product.Sales))
+sku_orders_wk_all$Buy.Box.Percentage = as.numeric(gsub("[//%,]", "", sku_orders_wk_all$Buy.Box.Percentage))
+sku_orders_wk_all$Buy.Box.Percentage = sku_orders_wk_all$Buy.Box.Percentage*0.01
+
+sku_orders_wk_all[,c(5,7,10,13)] <- lapply(sku_orders_wk_all[,c(5,7,10,13)], function(x) as.numeric(gsub("//,", "", as.character(x))))
+
+total_orders <- sum(sku_orders_wk_all$Units.Ordered)
+
+tbl_vars(sku_orders_wk_all)
+sku_orders_wk_clean <- sku_orders_wk_all %>% 
+  group_by(SKU, `sku_orders_wk_file[i]`,Title, `ï...Parent..ASIN`) %>% 
+  summarise(sessions = sum(Sessions),
+            page_view = sum(Page.Views),
+            total_orders = sum(Total.Order.Items),
+            unit_orders = sum(Units.Ordered),
+            sales_usd = sum(Ordered.Product.Sales),
+            buy_box_percentage = mean(Buy.Box.Percentage)) %>% 
+  left_join(sku_list, by = c("SKU"="sku")) %>% 
+  mutate(isbn_raw = ifelse(is.na(isbn) & startsWith(SKU, "97"), substr(SKU, start = 1, stop = 13), isbn),
+         isbn_new = ifelse(is.na(isbn_raw), `ï...Parent..ASIN`, isbn_raw),
+         category_new = ifelse(is.na(category), "Textbooks", category))
+
+total_orders_sku <- sum(sku_orders_wk_clean$unit_orders)
+
+tbl_vars(sku_orders_wk_clean)
+sku_orders_wk_clean <- sku_orders_wk_clean[,c(1, 14, 15, 2, 3, 5:10)]
+sku_orders_wk_clean[,c(5:10)][is.na(sku_orders_wk_clean[,c(5:10)])] <- 0
+
+colnames(sku_orders_wk_clean) <- c("sku","isbn_new", "source","ytd_wk", "title", "amz_sessions","amz_pageviews","amz_orders","amz_units","amz_sales_usd", "amz_buy_box_percentage")
+
+sku_orders_wk_clean$source <- ifelse(startsWith(sku_orders_wk_clean$isbn_new, "B"), "PPE", sku_orders_wk_clean$source)
+
+sku_orders_wk_clean$ytd_wk <- as.Date(sku_orders_wk_clean$ytd_wk)
+
+sku_orders_wk_clean$isbn_new <- as.character(sku_orders_wk_clean$isbn_new)
+
+lpoo_list$Isbn <- as.character(lpoo_list$Isbn)
+
+fifo_data$item_no <- as.character(fifo_data$item_no)
+sku_orders_wk_price <- lpoo_list %>% 
+  group_by(Isbn) %>% 
+  summarise(landed_cost = mean(USDUnitPrice)) %>% 
+  right_join(sku_orders_wk_clean, by = c("Isbn"= "isbn_new")) %>% 
+  left_join(tr_fees, by = "Isbn") %>% 
+  mutate(order_year = year(ytd_wk),
+         order_week = week(ytd_wk),
+         amz_seller_fees = ifelse(source %in% "Textbooks", 0.15*amz_sales_usd,0),
+         amz_shipping_fees = ifelse(source %in% "Textbooks", 7*amz_units, Fees*amz_units)) %>% 
+  left_join(fifo_data, by = c("Isbn"="item_no")) %>% 
+  mutate(unit_price_usd = ifelse(is.na(fifo), landed_cost, fifo),
+         total_price = unit_price_usd*amz_units)
+
+sku_orders_wk_price$Fees <- NULL
+sku_orders_wk_price$unit_price_usd <- with(sku_orders_wk_price, ave(unit_price_usd, source,
+    FUN = function(x) replace(x, is.na(x), mean(x, na.rm = TRUE))))
+
+sku_orders_wk_price$unit_price_usd[is.na(sku_orders_wk_price$unit_price_usd)] <- 0
+
+tbl_vars(sku_orders_wk_price)
+
+```
+
+```{r data writing or push the data to database}
+write_xlsx(list(`Sale Raw Data` = sku_orders_wk_price), "C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Reports/Sale Report/Amz_Sales_Report_Raw.xlsx")
+
+con.microsoft.sql <- DBI::dbConnect(odbc::odbc(),
+                      Driver   = "SQL Server",
+                      Server   = "52.86.56.66",
+                      Database = "PROCUREMENTDB",
+                      UID      = "LisaLi",
+                      PWD      = "t4vUByNaANWqszXP",
+                      Port     =  1433)
+
+dbWriteTable(con.microsoft.sql, DBI::SQL("Retail.AmzWeeklySale"), as.data.frame(sku_orders_wk_price), overwrite = TRUE)
+```
+
+```{r sale date cleaning and analysis - ad hocs}
+sku_orders_adhoc_all <- read.csv("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Raw Data/Amazon_Raw/SKU_AdHoc_Manual_Raw/BusinessReport-1-18-21.csv")
+tbl_vars(sku_orders_adhoc_all)
+fifo_data <- fifo_data_fix[,c("item_no", "fifo_new")]
+colnames(fifo_data) <- c("item_no", "fifo")
+
+# sku_list$isbn <- as.character(sku_list$isbn)
+sku_orders_adhoc_all$Ordered.Product.Sales = as.numeric(gsub("[//$,]", "", sku_orders_adhoc_all$Ordered.Product.Sales))
+sku_orders_adhoc_all$`Ordered.Product.Sales...B2B` = as.numeric(gsub("[//$,]", "", sku_orders_adhoc_all$`Ordered.Product.Sales...B2B`))
+sku_orders_adhoc_all$Buy.Box.Percentage = as.numeric(gsub("[//%,]", "", sku_orders_adhoc_all$Buy.Box.Percentage))
+sku_orders_adhoc_all$Buy.Box.Percentage = sku_orders_adhoc_all$Buy.Box.Percentage*0.01
+
+sku_orders_adhoc_all[,c(5,7,10,11,16,17)] <- lapply(sku_orders_adhoc_all[,c(5,7,10,11,16,17)], function(x) as.numeric(gsub("//,", "", as.character(x))))
+
+total_orders <- sum(sku_orders_adhoc_all$Units.Ordered)
+
+inventory_today_filter <- inventory_day_all %>% 
+  filter(report_date == Sys.Date()) %>% 
+  select(item_no, instock_inventory, warehouse_instock, amazon_instock) %>% 
+  group_by(item_no) %>% 
+  summarise(instock_inventory = sum(instock_inventory),
+            warehouse_instock = sum(warehouse_instock),
+            amazon_instock = sum(amazon_instock)) 
+
+# inventory_today_melt <- melt(inventory_today_filter, id.vars = c("item_no", "category", "instock_inventory")) %>% 
+#  filter(!category %in% "PPE")
+
+inventory_today_filter$item_no <- as.character(inventory_today_filter$item_no)
+tbl_vars(sku_orders_adhoc_all)
+sku_orders_adhoc_clean <- sku_orders_adhoc_all %>% 
+  group_by(SKU, Title, `ï...Parent..ASIN`) %>% 
+  summarise(sessions = sum(Sessions),
+            page_view = sum(Page.Views),
+            total_orders = sum(Total.Order.Items) + sum(`Total.Order.Items...B2B`),
+            unit_orders = sum(Units.Ordered) + sum(`Units.Ordered...B2B`),
+            sales_usd = sum(Ordered.Product.Sales) + sum(`Ordered.Product.Sales...B2B`),
+            buy_box_percentage = mean(Buy.Box.Percentage)) %>% 
+  left_join(sku_list, by = c("SKU"="sku")) %>% 
+  mutate(isbn_raw = ifelse(is.na(isbn) & startsWith(SKU, "97"), substr(SKU, start = 1, stop = 13), isbn),
+         isbn_new = ifelse(is.na(isbn_raw), `ï...Parent..ASIN`, isbn_raw)) %>% 
+  ungroup() 
+
+tbl_vars(sku_orders_adhoc_clean)
+
+sku_orders_adhoc_clean$isbn_new <- as.character(sku_orders_adhoc_clean$isbn_new)
+
+sku_orders_adhoc_clean <- sku_orders_adhoc_clean %>% 
+  select(SKU, isbn_new, Title, sessions, page_view, total_orders, unit_orders, sales_usd, buy_box_percentage)
+
+colnames(sku_orders_adhoc_clean) <- c("sku","isbn_new", "title", "amz_sessions","amz_pageviews","amz_orders","amz_units","amz_sales_usd", "amz_buy_box_percentage")
+
+sku_orders_adhoc_clean$isbn_new <- as.character(sku_orders_adhoc_clean$isbn_new)
+
+fifo_data$item_no <- as.character(fifo_data$item_no)
+
+sku_orders_adhoc_price <- sku_orders_adhoc_clean %>% 
+  full_join(inventory_today_filter, by = c("isbn_new" = "item_no")) %>% 
+  left_join(fifo_data, by = c("isbn_new"="item_no")) %>% 
+  left_join(keepa_data, by = c("isbn_new"="isbn_new")) 
+
+sku_list_new <- sku_list %>% 
+  group_by(isbn, category) %>% 
+  summarise(sku_count = n())
+
+sku_orders_adhoc_price <- sku_orders_adhoc_price %>% 
+  left_join(sku_list_new, by = c("isbn_new" = "isbn"))
+
+sku_orders_adhoc_price$fifo  <- with(sku_orders_adhoc_price, ave(fifo, category,
+                                                                    FUN = function(x) replace(x, is.na(x), mean(x, na.rm = TRUE))))
+
+tbl_vars(sku_orders_adhoc_price)
+
+sku_orders_adhoc_price <- sku_orders_adhoc_price %>% 
+  select(sku, isbn_new, title, asin, buy_box_seller, publication_date, category, sale_rank_current, sku_count,amz_sessions, amz_pageviews, amz_orders, amz_units, amz_sales_usd, amz_buy_box_percentage, instock_inventory, warehouse_instock, amazon_instock, fifo, buybox_current, buybox_30day_avg, new_offer_count, FBA_fees)
+
+sku_orders_adhoc_price[,c(8:23)][is.na(sku_orders_adhoc_price[,c(8:23)])] <- 0
+
+sku_orders_adhoc_price <- sku_orders_adhoc_price %>% 
+  filter(category %in% c("Textbooks", "Trade Books")) %>% 
+  mutate(total_cost = fifo*amz_units,
+         gross_margin = (amz_sales_usd*0.85 - total_cost - amz_units*FBA_fees)/amz_sales_usd,
+         channel = ifelse(str_detect(sku, "TB") | str_detect(sku, "AW") | str_detect(sku, "MFN") | str_detect(sku, "FBM"), "FBM", "FBA"))
+  
+  
+tbl_vars(sku_orders_adhoc_price)
+
+library(odbc)
+
+con.microsoft.sql <- DBI::dbConnect(odbc::odbc(),
+                      Driver   = "SQL Server",
+                      Server   = "52.86.56.66",
+                      Database = "BookXCenterProduction",
+                      UID      = "LisaLi",
+                      PWD      = "t4vUByNaANWqszXP",
+                      Port     =  1433)
+
+pub_list_sql <- dbSendQuery(con.microsoft.sql, "SELECT T.Isbn, T.PublisherSource AS Publisher FROM Bookxcenterproduction.isbn.bibliography T WHERE T.PublisherSource IS NOT NULL GROUP BY T.Isbn, T.PublisherSource")
+pub_list <- dbFetch(pub_list_sql)
+colnames(pub_list) <- c("isbn", "publisher")
+sku_orders_adhoc_price <- sku_orders_adhoc_price %>% 
+  left_join(pub_list, by = c("isbn_new" = "isbn"))
+
+sku_orders_adhoc_price[,c(1:5,7)][is.na(sku_orders_adhoc_price[,c(1:5,7)])] <- ""
+
+write.xlsx(sku_orders_adhoc_price, sheetName = "7 Days Sale Performance","C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Ad Hoc/Performance Analysis/Ad Hoc 7 Days Performance_2021-01-18.xlsx")
+
+```
+
+```{r inventory aging report}
+## Pause: waiting for the query
+inventory_age <- read_xlsx("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Raw Data/SAP_Raw/Inventory Aging Report/Inventory Aging Report_2020-12-12.xlsx")
+
+inventory_age$`Item No.` <- as.character(inventory_age$`Item No.`)
+
+tbl_vars(inventory_age)
+
+inventory_age_flag <- inventory_age %>% 
+# filter(Whse %in% c("TR", "03", "AW")) %>% 
+  group_by(`Item No.`) %>% 
+  summarise(`0-30 Days` = sum(`0-30 Days - Quantity`),
+            `31-90 Days` = sum(`31-90 Days - Quantity`),
+            `91-180 Days` = sum(`91-180 Days - Quantity`),
+            `181-300 Days` = sum(`181-300 Days - Quantity`),
+            `301-450 Days` = sum(`301-450 Days - Quantity`),
+            `450+ Days` = sum(`451-630 Days - Quantity`),
+            `Total - Quantity` = sum(`Total - Quantity`),
+            `0-30 Days Per` = sum(`0-30 Days - Quantity`)/sum(`Total - Quantity`)*1,
+            `31-90 Days Per` = sum(`31-90 Days - Quantity`)/sum(`Total - Quantity`)*1,
+            `91-180 Days Per` = sum(`91-180 Days - Quantity`)/sum(`Total - Quantity`)*2,
+            `181-300 Days Per` = sum(`181-300 Days - Quantity`)/sum(`Total - Quantity`)*3,
+            `301-450 Days Per` = sum(`301-450 Days - Quantity`)/sum(`Total - Quantity`)*4,
+            `450+ Days Per` = sum(`451-630 Days - Quantity`)/sum(`Total - Quantity`)*4) %>% 
+  mutate(aging_bucket = round(`0-30 Days Per` + `31-90 Days Per` + `91-180 Days Per` + `181-300 Days Per` + `301-450 Days Per` + `450+ Days Per`,0))
+
+inventory_age_flag <- inventory_age_flag %>% 
+  select(`Item No.`, `0-30 Days`, `31-90 Days`, `91-180 Days`, `181-300 Days`, `301-450 Days`, `450+ Days`, aging_bucket)
+```
+
+```{r ad hoc 3 weeks sale}
+weeks <- sku_orders_wk_price %>% 
+  group_by(ytd_wk) %>% 
+  summarise(n = n()) %>% 
+  top_n(3, ytd_wk)
+
+weeks <- as.list(weeks$ytd_wk)
+
+sale_total <-  sku_orders_wk_price %>% 
+  filter(ytd_wk %in% weeks) %>% 
+  group_by(Isbn, sku) %>% 
+  summarise(weeks_gross_revenue = sum(amz_sales_usd),
+            weeks_units_sold = sum(amz_units)) %>% 
+  left_join(sku_list, by = "sku") %>% 
+  select(Isbn, sku, weeks_units_sold, weeks_gross_revenue, category) %>% 
+  mutate(channel = ifelse(str_detect(sku, "TB") | str_detect(sku, "AW") | str_detect(sku, "MFN") | str_detect(sku, "FBM"), "FBM", "FBA"))
+
+write.csv(sale_total, "C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/3weeks_sale.csv", row.names = FALSE)
+```
+
+```{r textbooks wholesale pricing and weekly peformance}
+weeks <- sku_orders_wk_price %>% 
+  group_by(ytd_wk) %>% 
+  summarise(n = n()) %>% 
+  top_n(3, ytd_wk)
+
+weeks <- as.list(weeks$ytd_wk)
+
+list_date <- all_listing_data_class %>% 
+  select(isbn_new, OpenDate) %>% 
+  group_by(isbn_new) %>% 
+  summarise(max_list_date = max(OpenDate))
+
+list_date <- unique(list_date)
+
+velocity_report <-  sku_orders_wk_price %>% 
+  left_join(list_date, by = c("Isbn"="isbn_new")) %>% 
+  filter(ytd_wk %in% weeks) %>% 
+  group_by(Isbn, max_list_date) %>% 
+  summarise(weeks_gross_revenue = sum(amz_sales_usd),
+            weeks_units_sold = sum(amz_units),
+            listing_days = mean(as.numeric(Sys.Date() - max_list_date))) %>% 
+  select(Isbn, max_list_date,weeks_units_sold, weeks_gross_revenue, listing_days) %>% 
+  full_join(inventory_report_aw_value[,c(1,2)], by = c("Isbn" = "item_no")) %>% 
+  mutate(velocity = ifelse(is.na(listing_days), weeks_units_sold/28,
+                       ifelse(listing_days >= 14, weeks_units_sold/28, weeks_units_sold/listing_days)),
+         excess_quantity = round(instock_inventory - velocity*28,0))
+                                    
+inventory_report_aw$isbn_new <- as.character(inventory_report_aw$isbn_new)
+
+fifo_data$item_no <- as.character(fifo_data$item_no)
+## Use 4 weeks inventory lab to calculate wholesale price velocity 
+segments_book <- keepa_data %>% 
+  right_join(inventory_report_aw, by = c("isbn_new")) %>% 
+  filter(!amazon_instock_fulfillable == 0 | !warehouse_instock == 0) %>% 
+  left_join(fifo_data, by = c("isbn_new" = "item_no")) %>% 
+  mutate(out_of_money = ifelse(!is.na(buybox_30day_avg), (buybox_30day_avg - 7- 0.15*buybox_30day_avg - fifo), (buybox_current - 7- 0.15*buybox_current - fifo))) %>% 
+  left_join(velocity_report, by = c("isbn_new" = "Isbn")) 
+
+tbl_vars(segments_book)
+segments_book[,-c(1,2,6,7,17)][is.na(segments_book[,-c(1,2,6,7,17)])] <- 0
+segments_book <- segments_book %>% 
+  mutate(roi_retail = round(ifelse(fifo == 0, 0, out_of_money/fifo),4),
+         out_flag = ifelse(out_of_money <= 0, 1, 0),
+         excess_flag = ifelse(velocity*60 - (amazon_instock_fulfillable + warehouse_instock)*0.88 <= 0, 1, 0),
+         age_flag = ifelse(year(publication_date) < 2016 | is.na(publication_date), 1, 0),
+         bucket_flag = ifelse(excess_flag %in% c("1","0") & out_flag == 0 & age_flag %in% c("1","0"), 1,
+                              ifelse(excess_flag == 0 & out_flag == 1 & age_flag == 0, 2,
+                                     ifelse(excess_flag == 1 & out_flag == 0 & age_flag == 1, 3,
+                                            ifelse(excess_flag == 1 & out_flag == 1 & age_flag == 0, 4,
+                                                   ifelse(excess_flag == 0 & out_flag == 1 & age_flag == 1, 5,
+                                                                 ifelse(excess_flag == 1 & out_flag == 1 & age_flag == 1, 6, "Unknown"))))))) %>% 
+  left_join(inventory_age_flag, by = c("isbn_new" = "Item No.")) 
+  
+
+segments_book[,c(28:34)][is.na(segments_book[,c(28:34)])] <- 0
+
+segments_book <- segments_book %>% 
+  mutate(aging_bucket = ifelse(aging_bucket == 0, 1, aging_bucket))
+
+segments_book$bucket_flag <- as.numeric(segments_book$bucket_flag)
+segments_book$age_flag <- as.numeric(segments_book$age_flag)
+segments_book$aging_bucket <- as.numeric(segments_book$aging_bucket)
+
+segments_book_filter <- segments_book %>% 
+  mutate(buybox = ifelse(buybox_current != 0 & buybox_current > buybox_30day_avg, buybox_current, buybox_30day_avg),
+         fifo_buybox = ifelse(buybox != 0 & fifo != 0 & (buybox - fifo) > 0, fifo, 
+                              ifelse(buybox == 0 & fifo != 0 & (buybox - fifo) <= 0, fifo, buybox)),
+         fifo_buybox = ifelse(fifo == 0 & buybox != 0, (buybox*0.85-7)/1.25*1.18, fifo_buybox),
+         wholesale_price = ifelse(bucket_flag %in% c("1","2") & aging_bucket == 1, fifo_buybox*(1+0.25), 
+                                  ifelse(bucket_flag == 1 & aging_bucket == 2, fifo_buybox*(1+0.2),
+                                         ifelse((bucket_flag == 3 & aging_bucket == 1)| 
+                                                (bucket_flag == 2 & aging_bucket == 2), fifo_buybox*(1+0.18), 
+                                                ifelse((bucket_flag == 4 & aging_bucket == 1)|
+                                                       (bucket_flag == 3 & aging_bucket == 2)|
+                                                       (bucket_flag == 1 & aging_bucket ==3), fifo_buybox*(1+0.15),
+                                                       ifelse(bucket_flag == 2 & aging_bucket == 3, fifo_buybox*(1+0.13),
+                                                              ifelse((bucket_flag == 5 & aging_bucket == 1)|
+                                                                     (bucket_flag == 3 & aging_bucket ==3), fifo_buybox*(1+0.1),
+                                                                     ifelse((bucket_flag == 6 & aging_bucket == 1)|
+                                                                            (bucket_flag == 4 & aging_bucket == 2)|
+                                                                            (bucket_flag == 5 & aging_bucket == 2), fifo_buybox*(1+0.05),
+                                                                            ifelse((bucket_flag == 4 & aging_bucket == 3)|
+                                                                                   (bucket_flag == 5 & aging_bucket == 3), fifo_buybox*(1+0.03), fifo_buybox*(1+roi_retail))))))))),
+         wholesale_price = ifelse(wholesale_price == 0 & buybox > 0 & bucket_flag %in% c(4,5,6) & aging_bucket %in% c(3,4), (buybox*0.85 - 7)/1.25*1.12, 
+                                  ifelse(wholesale_price == 0 & buybox > 0 & bucket_flag %in% c(1,2,3) & aging_bucket %in% c(1,2), (buybox*0.85 - 7)/1.25*1.18, wholesale_price)),
+         wholesale_price = ifelse(wholesale_price == 0 & buybox == 0 & aging_bucket %in% c(3,4), 14.99, 
+                                  ifelse(wholesale_price == 0 & buybox == 0 & aging_bucket %in% c(1,2), 999.99, wholesale_price)))
+
+#              wholesale_price_07292020 = ifelse(amazon_instock == 0 & fifo !=0, fifo*(1+0.22), wholesale_price_roi)
+#              wholesale_price_07302020 = ifelse(fifo == 0 & open_quantity == 0, buybox_30day_avg*1.15, wholesale_price_07292020)
+
+wholesale_inventory_price <- segments_book_filter
+
+tbl_vars(wholesale_inventory_price)
+
+wholesale_inventory_price$isbn_new <- as.character(wholesale_inventory_price$isbn_new)
+wholesale_inventory_price$sale_rank_current <- as.numeric(wholesale_inventory_price$sale_rank_current)
+wholesale_inventory_price$out_flag <- as.numeric(wholesale_inventory_price$out_flag)
+
+wholesale_inventory_price$open_quantity <- NULL
+wholesale_inventory_price$total_inventory <- NULL
+wholesale_inventory_price <- wholesale_inventory_price %>% 
+  mutate(instock_inventory = amazon_instock_fulfillable + warehouse_instock)
+
+# repricing_isbns <- read_xlsx("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Reports/Temp Files/Inventory With Pricing 11-2-2020.xlsx", sheet = 1)
+# repricing_isbns$ISBN <- as.character(repricing_isbns$ISBN)
+
+# wholesale_inventory_price <- wholesale_inventory_price %>% 
+#   left_join(repricing_isbns, by = c("isbn_new" = "ISBN")) %>% 
+#   mutate(wholesale_price = ifelse(is.na(WP), wholesale_price, WP))
+
+# wholesale_inventory_price$WP <- NULL
+
+wholesale_inventory_price <- wholesale_inventory_price %>% 
+  filter(startsWith(isbn_new, "97"))
+
+
+total_orders_textbooks <- sku_orders_wk_price %>% 
+  filter(source %in% "Textbooks") %>% 
+  group_by(Isbn) %>% 
+  summarise(total_units_sold = sum(amz_units),
+            total_gross_revenue = sum(amz_sales_usd)) 
+
+wholesale_inventory_price <- wholesale_inventory_price %>% 
+  mutate(fba_flag = ifelse(bucket_flag %in% c("5","6") & aging_bucket == 4, "Red",
+                           ifelse((bucket_flag %in% c("4","5") & aging_bucket == 3) | (bucket_flag %in% c("3","4") & aging_bucket == 4), "Orange",
+                                  ifelse((bucket_flag %in% c("5", "6") & aging_bucket == 1) | 
+                                         (bucket_flag %in% c("4", "5", "6") & aging_bucket == 2) | 
+                                         (bucket_flag == 3 & aging_bucket == 3) | 
+                                         (bucket_flag %in% c("1","2") & aging_bucket == 4), "Yellow", "Green"))),
+         fba_min_price = ifelse(fba_flag %in% c("Red", "Orange"), "No min",
+                                ifelse(fba_flag %in% "Yellow", (fifo_buybox + 7)/0.85,
+                                       ifelse(fba_flag %in% "Green", (fifo_buybox + 7)/0.85*(1+0.1), fifo_buybox))),
+         fba_str_price = ifelse(fba_flag %in% c("Green", "Yellow"), buybox_current*0.8,
+                                ifelse(fba_flag %in% "Orange", buybox_current*0.9,
+                                       ifelse(fba_flag %in% "Red", buybox_current, buybox_current))),
+         fba_min_price = ifelse(fba_min_price <= 0, "Breakeven Negative", fba_min_price),
+         fba_str_price = ifelse(fba_str_price == 0, "Check Current Buy Box", fba_str_price)) %>% 
+  left_join(sku_list, by = c("isbn_new" = "isbn")) %>% 
+  left_join(total_orders_textbooks, by = c("isbn_new" = "Isbn"))
+
+
+wholesale_inventory_price$category <- NULL
+
+wholesale_inventory_price <- wholesale_inventory_price %>% 
+  arrange(isbn_new) %>% 
+  distinct(isbn_new,.keep_all = TRUE) 
+
+wholesale_inventory_price$aging_bucket <- as.numeric(wholesale_inventory_price$aging_bucket)
+
+wholesale_inventory_price$total_units_sold[is.na(wholesale_inventory_price$total_units_sold)] <- 0
+wholesale_inventory_price$total_gross_revenue[is.na(wholesale_inventory_price$total_gross_revenue)] <- 0
+
+wholesale_inventory_price$bucket_flag <- as.numeric(wholesale_inventory_price$bucket_flag)
+wholesale_inventory_price_f <- wholesale_inventory_price %>% 
+  mutate(buybox = ifelse(buybox_current != 0 & buybox_current > buybox_30day_avg, buybox_current, buybox_30day_avg),
+         wholesale_price = ifelse(wholesale_price <= 15 & buybox > 0, (buybox*0.85-7)/1.25*1.1, wholesale_price),
+         wholesale_price = ifelse(buybox > 0 & (wholesale_price - buybox) > 0 & bucket_flag > 2, (buybox*0.85-7)/1.25*1.2, wholesale_price),
+         wholesale_price = ifelse(wholesale_price < 5, 5, wholesale_price),
+         comment_flag = ifelse(aging_bucket == 4, "Accept highest bid: aging older than 300 days",
+                                      ifelse(aging_bucket == 3 & bucket_flag == 4, "Accept FIFO bid: aging book & bad performance",
+                                             ifelse(aging_bucket == 3 & bucket_flag > 4, "Accept highest bid: aging book & bad performance",
+                                             ifelse((wholesale_price - buybox > 0) & fifo_buybox != 0 & buybox != 0, "Accept buybox bid: higher WP", 
+                                                    ifelse((wholesale_price - fifo_buybox) <= 0 & fifo_buybox !=0, "Accept FIFO bid: out of money",
+                                                           ifelse(fifo_buybox == 0 & buybox == 0 & aging_bucket %in% c(3,4), "Bid to sell: flat rate", "Price to Sell: fixed WP")))))))%>% 
+  select(isbn_new,
+         asin,
+         sku,
+         wholesale_price,
+         comment_flag,
+         fifo,
+         fifo_buybox,
+         buybox,
+         fba_min_price,
+         fba_str_price,
+         fba_flag,
+         sale_rank_current,
+         publication_date,
+         amazon_instock,
+         amazon_instock_fulfillable,
+         warehouse_instock,
+         instock_inventory,
+         out_flag,
+         excess_flag,
+         age_flag,
+         bucket_flag,
+         aging_bucket,
+         total_units_sold,
+         total_gross_revenue) %>% 
+  mutate(wholesale_price_aw = ifelse(fba_flag %in% c("Green", "Yellow") & !is.na(fifo_buybox), fifo_buybox*1.18, wholesale_price),
+         wholesale_price_fba = ifelse(fba_flag %in% c("Green", "Yellow") & !is.na(fifo_buybox), fifo_buybox*1.18+4, wholesale_price+4))
+
+isbn_groups <- wholesale_inventory_price_f %>% 
+  group_by(comment_flag) %>% 
+  summarise(isbns = n_distinct(isbn_new))
+
+```
+
+```{r trade books wholes pricing and weekly performance}
+weeks <- sku_orders_wk_price %>% 
+  group_by(ytd_wk) %>% 
+  summarise(n = n()) %>% 
+  top_n(4, ytd_wk)
+
+weeks <- as.list(weeks$ytd_wk)
+
+velocity <- sku_orders_wk_price %>% 
+  filter(ytd_wk %in% weeks,
+         source %in% "Trade Books") %>% 
+  group_by(Isbn) %>% 
+  summarise(velocity = sum(amz_units)/28) 
+
+inventory_report_tr <- unique(inventory_report_tr)
+
+fifo_data <- unique(fifo_data)
+
+inventory_report_tr$isbn_new <- as.character(inventory_report_tr$isbn_new)
+
+list_date <- all_listing_data_class %>% 
+  select(isbn_new, OpenDate)
+
+list_inventory_title <- inventory_sap %>% 
+  select(ItemCode, ItemName, UnitLandedCost)
+
+
+list_date <- unique(list_date)
+
+list_inventory_title <- unique(list_inventory_title)
+
+all_in_one_tr <- sku_orders_wk_price %>% 
+  filter(source %in% "Trade Books") %>% 
+  group_by(Isbn) %>% 
+  summarise(total_units_sold = sum(amz_units),
+            total_gross_revenue = sum(amz_sales_usd)) %>% 
+  left_join(velocity, by = "Isbn") %>% 
+  full_join(inventory_report_tr, by = c("Isbn"= "isbn_new")) %>% 
+  mutate(excess_quantity = round(total_inventory - velocity*28,0)) %>% 
+  left_join(fifo_data, by = c("Isbn" = "item_no")) %>% 
+  left_join(list_date, by = c("Isbn"="isbn_new")) %>% 
+  left_join(list_inventory_title, by = c("Isbn" = "ItemCode")) %>% 
+  left_join(keepa_data, by = c("Isbn"="isbn_new"))
+
+all_in_one_tr$sale_rank_current <- as.numeric(as.character(all_in_one_tr$sale_rank_current))
+all_in_one_tr[,c(2:11,14,16,17)][is.na(all_in_one_tr[,c(2:11,14,16,17)])] <- 0
+
+all_in_one_tr <- all_in_one_tr %>% 
+  mutate(fifo_cost = ifelse(fifo == 0, UnitLandedCost, fifo),
+         amz_sale_price = total_gross_revenue/total_units_sold,
+         roi_cal = (0.85*total_gross_revenue - fifo_cost*total_units_sold - 2.8*total_units_sold)/(fifo_cost*total_units_sold),
+         wholesale_price = ifelse(excess_quantity >= 100, fifo_cost, 
+                                  ifelse(velocity == 0, fifo_cost*(1+0.02),
+                                         ifelse(velocity <= 1 & velocity > 0, fifo_cost*(1+0.05),
+                                                ifelse(velocity > 1 & velocity <= 2, fifo_cost*(1+0.15), fifo_cost*(1+0.14))))),
+         wholesale_price = ifelse(!fifo_cost == 0, fifo_cost*(1+0.15), 
+                                  ifelse(wholesale_price == 0 & fifo_cost == 0, (buybox_30day_avg*0.85 - 2.9)/1.25, 
+                                      ifelse(wholesale_price == 0 & fifo_cost != 0, fifo_cost(1+0.15), wholesale_price))),
+         listing_days = Sys.Date() - OpenDate)
+
+all_in_one_tr <- unique(all_in_one_tr)
+
+all_in_one_tr <- all_in_one_tr %>% 
+  distinct(Isbn, .keep_all = TRUE)
+
+all_in_one_tr$sale_rank_current <- as.numeric(all_in_one_tr$sale_rank_current)
+all_in_one_tr$listing_days <- as.numeric(all_in_one_tr$listing_days)
+
+all_in_one_tr <- all_in_one_tr %>% 
+  filter(warehouse_instock != 0 | total_units_sold != 0) %>% 
+  mutate(roi_cal = ifelse(roi_cal == "Inf", 0, roi_cal))
+
+all_in_one_tr$open_quantity <- NULL
+all_in_one_tr$total_inventory <- NULL
+all_in_one_tr$fifo <- NULL
+
+all_in_one_tr$listing_days[is.na(all_in_one_tr$listing_days)] <- 0
+all_in_one_tr$new_offer_count <- as.numeric(all_in_one_tr$new_offer_count)
+
+all_in_one_tr$title <- all_in_one_tr$ItemName
+all_in_one_tr$ItemName <- NULL
+
+all_in_one_tr$UnitLandedCost <- NULL
+all_in_one_tr$OpenDate <- NULL
+
+all_in_one_tr$amz_sale_price[is.nan(all_in_one_tr$amz_sale_price)] <- 0
+all_in_one_tr$roi_cal[is.nan(all_in_one_tr$roi_cal)] <- 0
+
+all_in_one_tr <- all_in_one_tr %>% 
+  left_join(sku_list, by = c("Isbn" = "isbn"))
+
+all_in_one_tr$category <- NULL
+
+ all_in_one_tr <- all_in_one_tr %>% 
+  arrange(Isbn) %>% 
+  distinct(Isbn,.keep_all = TRUE)
+
+# repricing_isbns <- read_xlsx("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Reports/Temp Files/Inventory With Pricing 11-2-2020.xlsx", sheet = 2)
+# repricing_isbns$Isbn <- as.character(repricing_isbns$Isbn)
+
+# all_in_one_tr <- all_in_one_tr %>% 
+#  left_join(repricing_isbns, by = c("Isbn")) %>% 
+#  mutate(wholesale_price = ifelse(is.na(WP), wholesale_price, WP))
+  
+all_in_one_tr_w <- all_in_one_tr %>% 
+  select(Isbn,
+         title,
+         sku,
+         asin,
+         wholesale_price,
+         fifo_cost,
+         buybox_current,
+         buybox_30day_avg,
+         sale_rank_current,
+         amazon_instock,
+         amazon_instock_fulfillable,
+         warehouse_instock,
+         excess_quantity,
+         publication_date,
+         total_units_sold,
+         total_gross_revenue)
+
+all_in_one_tr_w <- all_in_one_tr_w %>% 
+  filter(warehouse_instock != 0)
+
+all_in_one_tr_w$wholesale_price_tr <- all_in_one_tr_w$wholesale_price
+all_in_one_tr_w$wholesale_price_fba <- all_in_one_tr_w$wholesale_price + 4
+```
+
+```{r trade book performance - sku level}
+weeks <- sku_orders_wk_price %>% 
+  group_by(ytd_wk) %>% 
+  summarise(n = n()) %>% 
+  top_n(3, ytd_wk)
+
+weeks <- as.list(weeks$ytd_wk)
+
+velocity <- sku_orders_wk_price %>% 
+  filter(ytd_wk %in% weeks,
+         source %in% "Trade Books") %>% 
+  group_by(Isbn) %>% 
+  summarise(velocity = sum(amz_units)/28) 
+
+inventory_report_tr <- unique(inventory_report_tr)
+
+fifo_data <- unique(fifo_data)
+
+inventory_report_tr$isbn_new <- as.character(inventory_report_tr$isbn_new)
+
+list_date <- all_listing_data_class %>% 
+  select(isbn_new, OpenDate)
+
+list_inventory_title <- inventory_sap %>% 
+  select(ItemCode, ItemName, UnitLandedCost)
+
+
+list_date <- unique(list_date)
+
+list_inventory_title <- unique(list_inventory_title)
+
+all_in_one_tr <- sku_orders_wk_price %>% 
+  filter(source %in% "Trade Books") %>% 
+  group_by(Isbn, sku) %>% 
+  summarise(total_units_sold = sum(amz_units),
+            total_gross_revenue = sum(amz_sales_usd)) %>% 
+  left_join(velocity, by = "Isbn") %>% 
+  full_join(inventory_report_tr_value, by = c("Isbn"= "item_no")) %>% 
+  mutate(excess_quantity = round(instock_inventory - velocity*28,0)) %>% 
+  left_join(list_date, by = c("Isbn"="isbn_new")) %>% 
+  left_join(list_inventory_title, by = c("Isbn" = "ItemCode")) %>% 
+  left_join(keepa_data, by = c("Isbn"="isbn_new"))
+
+all_in_one_tr$sale_rank_current <- as.numeric(as.character(all_in_one_tr$sale_rank_current))
+all_in_one_tr[,c(3:10,12,15,17,18,22,23)][is.na(all_in_one_tr[,c(3:10,12,15,17,18,22,23)])] <- 0
+
+all_in_one_tr <- all_in_one_tr %>% 
+  mutate(fifo_cost = ifelse(item_price == 0, UnitLandedCost, item_price),
+         amz_sale_price = total_gross_revenue/total_units_sold,
+         gm = ifelse(fifo_cost != 0, (0.85*total_gross_revenue - fifo_cost*total_units_sold - FBA_fees*total_units_sold)/total_gross_revenue, 0),
+         roi = ifelse(fifo_cost != 0, (0.85*total_gross_revenue - fifo_cost*total_units_sold - FBA_fees*total_units_sold)/(fifo_cost*total_units_sold),0),
+         listing_days = Sys.Date() - OpenDate,
+         channel = ifelse(str_detect(sku, "FBA"), "FBA", "FBM"))
+
+all_in_one_tr <- all_in_one_tr %>% 
+  distinct(sku, .keep_all = TRUE)
+
+all_in_one_tr$title <- all_in_one_tr$ItemName
+all_in_one_tr$ItemName <- NULL
+
+all_in_one_tr$landed_cost <- all_in_one_tr$UnitLandedCost
+all_in_one_tr$OpenDate <- NULL
+
+all_in_one_tr$amz_sale_price[is.nan(all_in_one_tr$amz_sale_price)] <- 0
+
+write.xlsx(list("Trade Book Performance" = all_in_one_tr),paste("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Reports/Performance Report/Trade Books Performance/Tradebooks_Performance_New_Updated_", sep = "", today(), ".xlsx"))
+
+```
+
+```{r trouble books wholesale pricing}
+troublebooks_price <- read_xlsx("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Reports/Temp Files/Inventory With Pricing 11-2-2020.xlsx", sheet = 3)
+troublebooks_price$ISBN <- as.character(troublebooks_price$ISBN)
+troublebooks_price <- troublebooks_price %>% 
+  full_join(troublebooks_inventory, by = c("ISBN" = "item_no")) %>% 
+  left_join(keepa_data, by = c("ISBN" = "isbn_new")) %>% 
+  select(ISBN, WP, warehouse_instock, buybox_current, buybox_30day_avg)
+
+troublebooks_price[,c(2:5)][is.na(troublebooks_price[,c(2:5)])] <- 0
+troublebooks_price <- troublebooks_price %>% 
+  mutate(wholesale_price = ifelse(WP == 0, (buybox_30day_avg*0.85 - 7)/1.25*1.05, WP),
+         wholesale_price = ifelse(wholesale_price <= 10, 8, wholesale_price)) %>% 
+  filter(warehouse_instock != 0) %>% 
+  select(ISBN, wholesale_price, warehouse_instock) 
+
+```
+
+```{r push to one drive folder}
+write.xlsx(list("Wholesale Price Textooks" = wholesale_inventory_price_f,
+                "Wholesale Price Trade Books" = all_in_one_tr_w,
+                "Wholesale Price Trouble Books" = troublebooks_price),paste("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting//Reports/Wholesale Report/Wholesale Price/Wholesale_Pricing_Report_", sep = "", today(), ".xlsx"))
+```
+
+```{r trade books push to the database}
+library(odbc)
+library(DBI)
+
+con.microsoft.sql <- DBI::dbConnect(odbc::odbc(),
+                      Driver   = "SQL Server",
+                      Server   = "52.86.56.66",
+                      Database = "PROCUREMENTDB",
+                      UID      = "LisaLi",
+                      PWD      = "t4vUByNaANWqszXP",
+                      Port     =  1433)
+
+dbWriteTable(con.microsoft.sql, DBI::SQL("Retail.WholeSaleInventoryPriceTR"), as.data.frame(all_in_one_tr_w), overwrite = TRUE)
+dbWriteTable(con.microsoft.sql, DBI::SQL("Retail.WholeSaleInventoryPriceTB"), as.data.frame(troublebooks_price), overwrite = TRUE)
+dbWriteTable(con.microsoft.sql, DBI::SQL("Retail.WholeSaleInventoryPrice"), as.data.frame(wholesale_inventory_price_f), overwrite = TRUE)
+# dbWriteTable(con.microsoft.sql, DBI::SQL("Retail.WholesaleRedFlagISBN"), as.data.frame(red_flag_isbns), overwrite = TRUE)
+# dbWriteTable(con.microsoft.sql, DBI::SQL("Retail.NoWholeSaleFilterList"), as.data.frame(no_wsale_isbns), overwrite = TRUE)
+```
+
+```{r ebay sales report - data cleaning and checking manuall cleaning required}
+ebay_path <- file.info(list.files("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Raw Data/eBay_Raw", full.names = T))
+ebay_file_name <- rownames(ebay_path)[which.max(ebay_path$mtime)]
+ebay_raw_data <- read.csv(ebay_file_name, skip = 1) 
+tbl_vars(ebay_raw_data)
+
+ebay_data <- ebay_raw_data %>% 
+  select(Order.Number,Custom.Label, Total.Price, Sold.For, Paid.On.Date) %>% 
+  left_join(sku_list, by = c("Custom.Label" = "sku")) %>% 
+  filter(category %in% c("Textbooks", "Trade Books"))
+
+colnames(ebay_data) <- c("order_num","sku", "total_price", "sold_price", "paid_date", "ISBN", "category")
+
+ebay_data$total_price <- as.numeric(gsub("[\\$,]", "",ebay_data$total_price))
+
+ebay_all_orders_org <- read.xlsx("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Raw Data/eBay_Raw/eBay Orders Cleaned Org/eBay Orders.xlsx")
+ebay_all_orders_org  <- ebay_all_orders_org  %>% 
+  select(Order.Number,Custom.Label, Total.Price, Sold.For, Paid.On.Date) %>% 
+  left_join(sku_list, by = c("Custom.Label" = "sku")) %>% 
+  filter(category %in% c("Textbooks", "Trade Books"))
+
+colnames(ebay_all_orders_org) <- c("order_num", "sku", "total_price", "sold_price", "paid_date", "ISBN", "category")
+
+ebay_data_filter <- rbind(ebay_data, ebay_all_orders_org) 
+ebay_data_filter <- ebay_data_filter %>%  
+  distinct(order_num,.keep_all = TRUE)
+```
+
+```{r trade book performance}
+ebay_sale_tr <- ebay_data_filter %>% 
+  filter(category %in% "Trade Books") %>% 
+  group_by(ISBN) %>% 
+  summarise(eBay_Orders = n(),
+            eBay_Sale = sum(total_price))
+
+trade_performance <- all_in_one_tr %>% 
+  full_join(ebay_sale_tr, by = c("Isbn" = "ISBN"))
+
+trade_performance$title[is.na(trade_performance$title)] <- "Unknown"
+trade_performance$eBay_Orders[is.na(trade_performance$eBay_Orders)] <- 0
+trade_performance$eBay_Sale[is.na(trade_performance$eBay_Sale)] <- 0
+
+trade_performance <- all_in_one_tr %>% ## Change here
+  mutate(roi_cal = ifelse(roi_cal == "Inf", 0, roi_cal))
+
+trend_purchase <- fifo_cost %>% 
+  filter(Warehouse_Code %in% "TR") %>% 
+  mutate(Purchased_Mth = month(Posting_Date, label = TRUE, abbr = TRUE)) %>% 
+  group_by(ISBN, Purchased_Mth) %>% 
+  summarise(Quantity = sum(Quantity)) %>% 
+  dcast(ISBN ~ Purchased_Mth, value.var = "Quantity")
+
+trend_sale <- sku_orders_wk_clean %>% 
+  filter(source %in% "Trade Books") %>% 
+  group_by(isbn_new, ytd_wk) %>% 
+  summarise(amz_units = sum(amz_units)) %>% 
+  dcast(isbn_new ~ ytd_wk, value.var = "amz_units")
+
+trade_performance <- trade_performance %>% 
+  arrange(Isbn) %>% 
+  distinct(Isbn,.keep_all = TRUE)
+
+trade_performance <- trade_performance %>% 
+  left_join(trend_purchase, by = c("Isbn" = "ISBN")) %>% 
+  left_join(trend_sale, by = c( "Isbn"= "isbn_new"))
+
+```
+
+```{r textbooks performance}
+ebay_sale_tx <- ebay_data_filter %>% 
+  filter(category %in% "Textbooks") %>% 
+  group_by(ISBN) %>% 
+  summarise(eBay_Orders = n(),
+            eBay_Sale = sum(total_price))
+
+text_performance <- wholesale_inventory_price %>% 
+  left_join(ebay_sale_tx, by = c("isbn_new" = "ISBN"))
+
+text_performance$eBay_Orders[is.na(text_performance$eBay_Orders)] <- 0
+text_performance$eBay_Sale[is.na(text_performance$eBay_Sale)] <- 0
+
+text_performance <- wholesale_inventory_price  %>% ## Change here
+  arrange(isbn_new) %>% 
+  distinct(isbn_new,.keep_all = TRUE)
+```
+
+```{r performance report saving}
+# trade_performance[,c(5:22)] <- lapply(trade_performance[,c(5:22)], function(x) as.numeric(round(x,2)))
+write.xlsx(list("Trade Book Performance" = trade_performance),paste("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Reports/Performance Report/Trade Books Performance/Tradebooks_Performance_", sep = "", today(), ".xlsx"))
+write.xlsx(list("Textbooks Performance" = text_performance),paste("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Reports/Performance Report/Textbooks Performance/Textbooks_Performance_", sep = "", today(), ".xlsx"))
+```
+
+```{r indaba file generator}
+wholesale_inventory_price$sku <- NULL
+
+indaba_inventory_file <- wholesale_inventory_price %>% 
+  left_join(sku_list, c("isbn_new" = "isbn")) %>% 
+  select(isbn_new, sku, instock_inventory, wholesale_price, category) %>% 
+  filter(!is.na(sku),
+         category %in% "Textbooks") 
+
+indaba_inventory_file$isbn_new <- as.character(indaba_inventory_file$isbn_new)
+indaba_inventory_file$sku <- as.character(indaba_inventory_file$sku)
+indaba_inventory_file <- indaba_inventory_file %>% 
+  mutate(wholesale_price = round(as.numeric(wholesale_price*1.05 + 1.5),1)) 
+
+indaba_inventory_file$category <- as.character(indaba_inventory_file$category)
+indaba_inventory_file$condition <- as.character("New")
+
+indaba_inventory_file <- indaba_inventory_file[,c(1,2,6,3:5)]
+colnames(indaba_inventory_file) <- c("ean", "sku", "condition", "quantity", "unit_price", "notes")
+
+indaba_inventory_file <- indaba_inventory_file %>% distinct(ean, .keep_all = TRUE)
+
+write.csv(indaba_inventory_file, paste("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Reports/Indaba Inventory/Uploading Inventory/Full_inventory_", sep  = "", today(), ".csv"), row.names = FALSE)
+```
+
+```{r velocity report - weekly}
+weeks <- sku_orders_wk_price %>% 
+  group_by(ytd_wk) %>% 
+  summarise(n = n()) %>% 
+  top_n(2, ytd_wk)
+
+weeks <- as.list(weeks$ytd_wk)
+
+inventory_report_aw$item_no <- as.character(inventory_report_aw$item_no)
+velocity_report_textbooks <-  sku_orders_wk_price %>% 
+  filter(ytd_wk %in% weeks) %>% 
+  group_by(Isbn) %>% 
+  summarise(total_gross_revenue = sum(amz_sales_usd),
+            total_units_sold = sum(amz_units)) %>% 
+  select(Isbn, total_units_sold, total_gross_revenue) %>% 
+  full_join(inventory_report_aw[,c(1,6)], by = c("Isbn" = "item_no")) %>% 
+  mutate(velocity = round(total_units_sold/14,2),
+         excess_quantity = round(total_inventory - velocity*60,0),
+         velocity_group = ifelse(velocity <= 0.5, "[01] <= 0.5 per Day",
+                                 ifelse(velocity > 0.5 & velocity <= 1,"[02] 0.5-1 per Day",
+                                        ifelse(velocity >1 & velocity <= 2, "[03] 1-2 per Day",
+                                               ifelse(velocity >2 & velocity <= 3, "[04] 2-3 per Day",
+                                                      ifelse(velocity >3, "[05] 3+ per Day", "[06] Unavailable"))))),
+         quantity_after_4wks = ifelse(excess_quantity <= 10, "[01] <= 10 in stock",
+                                      ifelse(excess_quantity > 10 & excess_quantity <=20,"[02] 10-20 in stock",
+                                              ifelse(excess_quantity > 20 & excess_quantity <=30,"[03] 20-30 in stock",
+                                                      ifelse(excess_quantity > 30 & excess_quantity <=60,"[04] 30-60 in stock",
+                                                              ifelse(excess_quantity > 60 & excess_quantity <=100,"[05] 60-100 in stock",
+                                                                      ifelse(excess_quantity > 100 & excess_quantity <=300,"[06] 100-300 in stock",
+                                                                              ifelse(excess_quantity >300,"[07] 300+ in stock", "[08] Unavailable"))))))),
+         source = rep("Textbooks")) %>% 
+  left_join(keepa_data, by = c("Isbn" = "isbn_new")) %>% 
+  left_join(fifo_data, by = c("Isbn" = "item_no")) %>% 
+  mutate(out_of_money = ifelse(!is.na(buybox_current), (buybox_current - 7- 0.15*buybox_current - fifo), (buybox_30day_avg - 7- 0.15*buybox_30day_avg - fifo)),
+         out_flag = ifelse(out_of_money > 0, "1", "0"))
+
+tbl_vars(velocity_report_textbooks)
+
+colnames(velocity_report_textbooks) <- c("isbn_new", "total_units_sold", "total_gross_revenue", "instock" , "velocity", "excess_quantity", "velocity_group", "quantity_after_4wks", "source", "asin", "buybox_current", "buybox_30day_avg", "sale_rank_current", "publication_date", "fifo", "out_of_money", "out_flag")
+inventory_report_tr$item_no <- as.character(inventory_report_tr$item_no)
+
+velocity_report_tradebooks <-  sku_orders_wk_price %>% 
+  filter(ytd_wk %in% weeks,
+         source %in% "Trade Books") %>% 
+  group_by(Isbn) %>% 
+  summarise(total_gross_revenue = sum(amz_sales_usd),
+            total_units_sold = sum(amz_units)) %>% 
+  select(Isbn, total_units_sold, total_gross_revenue) %>% 
+  full_join(inventory_report_tr[,c(1,3)], by = c("Isbn" = "item_no")) %>% 
+  mutate(velocity = round(total_units_sold/14,2),
+         excess_quantity = round(warehouse_instock - velocity*28,0),
+         velocity_group = ifelse(velocity <= 0.5, "[01] <= 0.5 per Day",
+                                 ifelse(velocity > 0.5 & velocity <= 1,"[02] 0.5-1 per Day",
+                                        ifelse(velocity >1 & velocity <= 2, "[03] 1-2 per Day",
+                                               ifelse(velocity >2 & velocity <= 3, "[04] 2-3 per Day",
+                                                      ifelse(velocity >3, "[05] 3+ per Day", "[06] Unavailable"))))),
+         quantity_after_4wks = ifelse(excess_quantity <= 10, "[01] <= 10 in stock",
+                                      ifelse(excess_quantity > 10 & excess_quantity <=20,"[02] 10-20 in stock",
+                                              ifelse(excess_quantity > 20 & excess_quantity <=30,"[03] 20-30 in stock",
+                                                      ifelse(excess_quantity > 30 & excess_quantity <=60,"[04] 30-60 in stock",
+                                                              ifelse(excess_quantity > 60 & excess_quantity <=100,"[05] 60-100 in stock",
+                                                                      ifelse(excess_quantity > 100 & excess_quantity <=300,"[06] 100-300 in stock",
+                                                                              ifelse(excess_quantity >300,"[07] 300+ in stock", "[08] Unavailable"))))))),
+         source = rep("Trade Books")) %>% 
+  left_join(keepa_data, by = c("Isbn" = "isbn_new")) %>% 
+  left_join(fifo_data, by = c("Isbn" = "item_no")) %>% 
+  mutate(out_of_money = ifelse(!is.na(buybox_current), (buybox_current - 7- 0.15*buybox_current - fifo), (buybox_30day_avg - 7- 0.15*buybox_30day_avg - fifo)),
+         out_flag = ifelse(out_of_money > 0, "1", "0"))
+
+colnames(velocity_report_tradebooks) <- c("isbn_new", "total_units_sold", "total_gross_revenue", "instock" , "velocity", "excess_quantity", "velocity_group", "quantity_after_4wks", "source", "asin", "buybox_current", "buybox_30day_avg", "sale_rank_current", "publication_date", "fifo", "out_of_money", "out_flag")
+
+velocity_report <- rbind(velocity_report_textbooks, velocity_report_tradebooks)
+
+velocity_report[,c(2:6)][is.na(velocity_report[,c(2:6)])] <- 0
+
+write.csv(velocity_report, "C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Reports/Velocity Report/Velocity_Report_Raw_New.csv", row.names = FALSE)
+```
+
+```{r 03 warehouse data mapping}
+zero3_data <- sap_raw_data %>% 
+  filter(WhsCode %in% "03") %>% 
+  full_join(asc_data, by = c("ItemCode" = "item_no")) %>% 
+  select(ItemCode, OnHand, Available, amazon_instock) %>% 
+  left_join(sku_list, by = c("ItemCode" = "isbn")) %>% 
+  filter(category %in% "Textbooks")
+
+zero3_data <- unique(zero3_data)
+zero3_data[,c(2,3,4)][is.na(zero3_data[,c(2,3,4)])] <- 0
+
+zero3_data <- zero3_data %>% 
+  mutate(diff_inventory = Available - amazon_instock)
+
+zero3_data <- zero3_data[,c(1,5,2:4,7)]
+colnames(zero3_data) <- c("Isbn","Sku", "03 Warehouse OnHand", "03 Warehouse Available", "FBA Amazon Total Qty", "Inventory Diff")
+
+write.csv(zero3_data, paste("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/QA Analysis/FBA_Warehouse_", sep = "", today(), ".csv"), row.names = FALSE)
+
+```
+
+```{r cost analysis}
+library(odbc)
+library(DBI)
+
+con.microsoft.sql <- DBI::dbConnect(odbc::odbc(),
+                      Driver   = "SQL Server",
+                      Server   = "52.86.56.66",
+                      Database = "PROCUREMENTDB",
+                      UID      = "LisaLi",
+                      PWD      = "t4vUByNaANWqszXP",
+                      Port     =  1433)
+
+cost_analysis_sql <- dbSendQuery(con.microsoft.sql, 
+"SELECT CASE WHEN T.InventoryQty IS NULL THEN 0 ELSE T.InventoryQty END AS BXC_INVENTORY
+	     ,T.TotalUnitCost AS LANDED_COST
+	     ,T.ISBN
+       ,CASE WHEN T.Title IS NULL THEN 'UNKNOWN' ELSE UPPER(T.Title) END AS TITLE
+       ,UPPER(T.Supplier) AS SUPPLIER
+  FROM PROCUREMENTDB.dbo.GoldenList T
+ WHERE T.publisher LIKE 'Random House%' 
+   AND T.BookType = 'Tradebook'
+   AND T.PublicationDate >= '2014'
+   AND T.AvailableQty > 0
+   AND CONVERT(VARCHAR(10), T.ExpirationDate, 111) - GETDATE() > 1
+   AND T.Title IS NOT NULL")
+
+today_list <- dbFetch(cost_analysis_sql)
+
+
+```
+
+```{r keepa connection}
+library(httr)
+library(rlist)
+library(jsonlite)
+library(dplyr)
+
+resp <- GET("https://api.keepa.com/query?key=d8pa8ikq3ifdgdudpg1dskd2aiov83iqkbfsvo42hlgbjsj8kd4ss61sjbmk7rkq&domain=1&selection=%7B%22current_SALES_gte%22%3A1%2C%22current_SALES_lte%22%3A50000%2C%22avg30_SALES_gte%22%3A1%2C%22avg30_SALES_lte%22%3A50000%2C%22current_BUY_BOX_SHIPPING_gte%22%3A1500%2C%22avg30_BUY_BOX_SHIPPING_gte%22%3A1500%2C%22rootCategory%22%3A283155%2C%22sort%22%3A%5B%5B%22current_SALES%22%2C%22asc%22%5D%5D%2C%22productType%22%3A%5B0%2C1%5D%2C%22perPage%22%3A100%2C%22page%22%3A0%7D")
+
+fromJSON(resp) %>% as.data.frame
+#. When we get the response from API we will use to very basic methods of httr.
+http_type(resp)  #. This method will tell us what is the type of response fetched from GET() call to the API.
+jsonRespText<-content(resp,as="text") 
+jsonRespText
+
+# Structurised data in form of R vectors and lists
+jsonRespParsed<-content(resp,as="parsed") 
+jsonRespParsed
+
+fromJSON(jsonRespText)
+
+modJson<-jsonRespParsed$asinList #. Access data element of whole list and ignore other vectors
+modJson
+
+#Using dplyr and base R
+modJson%>%bind_rows%>%select(id,first_name,last_name,avatar)
+```
+
+```{r Competitors ISBNs}
+com_list_file <- list.files("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Ad Hoc/Ad Hoc_Raw/Competitors Research", pattern="*.xlsx", full.names=TRUE)
+com_list <- lapply(com_list_file, read_xlsx, sheet = 1)
+for (i in 1:length(com_list)){com_list[[i]]<-cbind(com_list[[i]],com_list_file[i])}
+com_list_all <- do.call("rbind", com_list) 
+
+com_list_all$`com_list_file[i]` <- gsub("^.*-", "", com_list_all$`com_list_file[i]`)
+com_list_all$`com_list_file[i]` <- gsub(".xlsx", "", com_list_all$`com_list_file[i]`)
+
+# This table includes all information veolcity + inventory + sale + buy box price
+tbl_vars(com_list_all)
+
+com_list_all <- unique(com_list_all)
+
+com_list_all <- com_list_all %>% 
+  select(`Product Codes: EAN`, ASIN,`Title`, `Buy Box: Current`, `Buy Box: 90 days avg.`, `Sales Rank: Current`,`Used: 90 days avg.`,`New Offer Count: Current`, `Used Offer Count: Current`,`Buy Box Seller`, `Publication Date`, `com_list_file[i]`)
+
+colnames(com_list_all) <- c("isbn", "asin", "title","buybox_current", "buybox_90day_avg", "sale_rank_current", "used_90day_avg","new_offer_count","used_offer_count","buybox_seller", "publication_date", "competitor_name")
+
+com_list_all$publication_date <- as.Date(com_list_all$publication_date)
+library(stringr)
+com_list_all <- str_split_fixed(com_list_all$isbn, ",", 4) %>% 
+  cbind(com_list_all)
+
+tbl_vars(com_list_all)
+
+
+colnames(com_list_all) <- c("V1","V2","V3","V4","isbn", "asin", "title","buybox_current", "buybox_90day_avg", "sale_rank_current", "used_90day_avg","new_offer_count","used_offer_count","buybox_seller", "publication_date", "competitor_name")
+
+com_list_all <- com_list_all %>% 
+  mutate(isbn_new =  ifelse(startsWith(V2, " 97"), V2, 
+                            ifelse(startsWith(V3, " 97"), V3, V1))) %>% 
+  select("isbn_new","asin", "title","buybox_current", "buybox_90day_avg", "sale_rank_current", "used_90day_avg","new_offer_count","used_offer_count","buybox_seller", "publication_date", "competitor_name")
+
+com_list_all$buybox_current <- as.numeric(gsub("[\\$,]", "",com_list_all$buybox_current))
+com_list_all$buybox_30day_avg <- as.numeric(gsub("[\\$,]", "",com_list_all$buybox_90day_avg))
+
+com_list_all$isbn_new <- trimws(com_list_all$isbn_new)
+
+com_list_all$sale_rank_current <- as.numeric(com_list_all$sale_rank_current)
+
+com_list_all <- com_list_all %>% 
+  arrange(buybox_90day_avg) %>% 
+  distinct(isbn_new,.keep_all = TRUE) %>% 
+  filter(year(publication_date) >= 2016,
+         buybox_90day_avg >= 25,
+         !buybox_seller %in% c("-"),
+         sale_rank_current < 1000000) 
+
+today_inventory <- inventory_day_all %>% 
+  filter(report_date == Sys.Date())
+
+inventory_report_aw$item_no <- as.character(inventory_report_aw$item_no)
+com_list_inv <- com_list_all %>% 
+  left_join(sku_list[,c(2,3)], by = c("isbn_new" = "isbn")) %>% 
+  left_join(inventory_report_aw, by = c("isbn_new" = "item_no"))
+
+com_list_inv$item_desc <- NULL
+
+com_list_inv <- com_list_inv %>% 
+  left_join(isbn_list_full_filter, by = c("isbn_new" = "Isbn"))
+
+write_xlsx(list("Potential ISBN List" = com_list_inv), "C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Ad Hoc/Ad Hoc_Raw/Competitors Research/Potential ISBN List To-buy New.xlsx")
+```
+
+```{r Publisher ISBNs}
+pub_list_file <- list.files("C:/Users/lisal/bookxchange.com/Daniela Isaza - MARKET RESEARCH/PUBLISHERS TOP ISBN'S-WW/RAW DATA PUBLISHERS/DEC 2020", pattern="*.xlsx", full.names=TRUE)
+pub_list <- lapply(pub_list_file, read_xlsx, sheet = 1)
+for (i in 1:length(pub_list)){pub_list[[i]]<-cbind(pub_list[[i]],pub_list_file[i])}
+pub_list_all <- do.call("rbind", pub_list) 
+
+pub_list_all$`pub_list_file[i]` <- gsub("_.*", "", pub_list_all$`pub_list_file[i]`)
+pub_list_all$`pub_list_file[i]` <- gsub("^.*/", "", pub_list_all$`pub_list_file[i]`)
+# pub_list_all$`pub_list_file[i]` <- gsub("^.*.", "", pub_list_all$`pub_list_file[i]`)
+pub_list_all$`pub_list_file[i]` <- gsub(".xlsx", "", pub_list_all$`pub_list_file[i]`)
+
+# This table includes all information veolcity + inventory + sale + buy box price
+tbl_vars(pub_list_all)
+
+pub_list_all <- unique(pub_list_all)
+
+pub_list_all <- pub_list_all %>% 
+  select(`Product Codes: EAN`, ASIN,`Title`, `Buy Box: Current`, `Buy Box: 30 days avg.`, `Sales Rank: Current`,`New Offer Count: Current`, `Used Offer Count: Current`,`Buy Box Seller`, `Publication Date`, `pub_list_file[i]`)
+
+colnames(pub_list_all) <- c("isbn", "asin", "title","buybox_current", "buybox_30day_avg", "sale_rank_current", "new_offer_count","used_offer_count","buybox_seller", "publication_date", "competitor_name")
+
+pub_list_all$publication_date <- as.Date(pub_list_all$publication_date)
+library(stringr)
+pub_list_all <- str_split_fixed(pub_list_all$isbn, ",", 4) %>% 
+  cbind(pub_list_all)
+
+tbl_vars(pub_list_all)
+
+
+colnames(pub_list_all) <- c("V1","V2","V3","V4","isbn", "asin", "title","buybox_current", "buybox_30day_avg", "sale_rank_current", "new_offer_count","used_offer_count","buybox_seller", "publication_date", "competitor_name")
+
+pub_list_all <- pub_list_all %>% 
+  mutate(isbn_new =  ifelse(startsWith(V2, " 97"), V2, 
+                            ifelse(startsWith(V3, " 97"), V3, V1))) %>% 
+  select("isbn_new","asin", "title","buybox_current", "buybox_30day_avg", "sale_rank_current", "new_offer_count","used_offer_count","buybox_seller", "publication_date", "competitor_name")
+
+pub_list_all$buybox_current <- as.numeric(gsub("[//$,]", "",pub_list_all$buybox_current))
+
+pub_list_all$isbn_new <- trimws(pub_list_all$isbn_new)
+
+pub_list_all$sale_rank_current <- as.numeric(pub_list_all$sale_rank_current)
+
+pub_list_all[,c(4:8)][is.na(pub_list_all[,c(4:8)])] <- 0
+
+write_xlsx(list("PUBLISHERS ISBN LIST" = pub_list_all), "C:/Users/lisal/bookxchange.com/Daniela Isaza - MARKET RESEARCH/PUBLISHERS TOP ISBN'S-WW/RAW DATA PUBLISHERS/DEC 2020/PUBLISHERS_ISBN_LIST_CLEANED.xlsx")
+```
+
+```{r Publisher ISBNs - Filter}
+pub_list_file <- list.files("C:/Users/lisal/bookxchange.com/Daniela Isaza - MARKET RESEARCH/NEW PUBS", pattern="*.xlsx", full.names=TRUE)
+pub_list <- lapply(pub_list_file, read_xlsx, sheet = 1)
+for (i in 1:length(pub_list)){pub_list[[i]]<-cbind(pub_list[[i]],pub_list_file[i])}
+pub_list_all <- do.call("rbind", pub_list) 
+
+pub_list_all$`pub_list_file[i]` <- gsub("_.*", "", pub_list_all$`pub_list_file[i]`)
+pub_list_all$`pub_list_file[i]` <- gsub("^.*/", "", pub_list_all$`pub_list_file[i]`)
+# pub_list_all$`pub_list_file[i]` <- gsub("^.*.", "", pub_list_all$`pub_list_file[i]`)
+pub_list_all$`pub_list_file[i]` <- gsub(".xlsx", "", pub_list_all$`pub_list_file[i]`)
+
+# This table includes all information veolcity + inventory + sale + buy box price
+tbl_vars(pub_list_all)
+
+pub_list_all <- unique(pub_list_all)
+
+pub_list_all <- pub_list_all %>% 
+  select(`Product Codes: EAN`, ASIN,`Title`, `Buy Box: Current`, `Buy Box: 30 days avg.`, `Buy Box: Lowest`,`Sales Rank: Lowest`,`Sales Rank: Current`,`New Offer Count: Current`, `Used Offer Count: Current`,`Buy Box Seller`, `Publication Date`, `pub_list_file[i]`)
+
+colnames(pub_list_all) <- c("isbn", "asin", "title","buybox_current", "buybox_30day_avg", "buybox_lowest", "sale_rank_lowest","sale_rank_current", "new_offer_count","used_offer_count","buybox_seller", "publication_date", "competitor_name")
+
+pub_list_all$publication_date <- as.Date(pub_list_all$publication_date)
+library(stringr)
+pub_list_all <- str_split_fixed(pub_list_all$isbn, ",", 4) %>% 
+  cbind(pub_list_all)
+
+tbl_vars(pub_list_all)
+
+
+colnames(pub_list_all) <- c("V1","V2","V3","V4","isbn", "asin", "title","buybox_current", "buybox_30day_avg", "buybox_lowest", "sale_rank_lowest", "sale_rank_current", "new_offer_count","used_offer_count","buybox_seller", "publication_date", "competitor_name")
+
+pub_list_all <- pub_list_all %>% 
+  mutate(isbn_new =  ifelse(startsWith(V2, " 97"), V2, 
+                            ifelse(startsWith(V3, " 97"), V3, V1))) %>% 
+  select("isbn_new","asin", "title","buybox_current", "buybox_30day_avg", "sale_rank_current", "buybox_lowest", "sale_rank_lowest", "new_offer_count", "used_offer_count","buybox_seller", "publication_date")
+
+pub_list_all$buybox_current <- as.numeric(gsub("[//$,]", "",pub_list_all$buybox_current))
+
+pub_list_all$isbn_new <- trimws(pub_list_all$isbn_new)
+
+pub_list_all$sale_rank_current <- as.numeric(pub_list_all$sale_rank_current)
+
+pub_list_all[,c(4:8)][is.na(pub_list_all[,c(4:8)])] <- 0
+
+pub_list_all<- pub_list_all %>% 
+  filter(sale_rank_lowest <= 20000,
+         buybox_current >= 25,
+         new_offer_count/used_offer_count <= 40,
+         sale_rank_current <= 500000,
+         year(publication_date) >= 2016,
+         sale_rank_current != 0)
+
+write_xlsx(list("PUBLISHERS ISBN LIST" = pub_list_all), "C:/Users/lisal/bookxchange.com/Daniela Isaza - MARKET RESEARCH/NEW PUBS/PUBLISHERS_ISBN_LIST_FILTERED.xlsx")
+```
+
+```{r database SQL data push}
+# Aug 4th to Aug 18th, use Pankaj's file instead 
+# wholesale_price_pn <- read_xlsx("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting//Reports/Wholesale Report/Textbooks Wholesale Price/Wholesale_Pricing_Report_2020-08-04_PN.xlsx", sheet = 1)
+
+# wholesale_inventory_price <- wholesale_inventory_price %>% 
+#   left_join(wholesale_price_pn[,c(1,2)], by = "isbn_new")
+
+# wholesale_inventory_price$wholesale_price.x <- NULL
+# wholesale_inventory_price <- wholesale_inventory_price[,c(1,19,2:18)]
+
+# colnames(wholesale_inventory_price) <- c("isbn_new","wholesale_price","publication_date", "buybox_current", "buybox_30day_avg", "sale_rank_current", "amazon_instock", "warehouse_instock", "open_quantity", "total_inventory", "fifo_cost", "velocity", "excess_quantity", "out_of_money", "roi_retail", "out_flag" , "excess_flag", "age_flag", "bucket_flag")
+
+# write.xlsx(list("Wholesale Price Textooks" = wholesale_inventory_price),paste("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting//Reports/Wholesale Report/Textbooks Wholesale Price/Wholesale_Pricing_Report_", sep = "", today(), ".xlsx"))
+```
+
+```{r daily sale fix}
+write_xlsx(list(`Open_Quantity` = open_quantity),
+           paste("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Reports/Inventory Report/BookXchange Team/Inventory by Day/Data Processing Version/Inventory_Reports_Raw_", sep = "", today(), ".xlsx"))
+
+inventory_day_file <- list.files("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Reports/Inventory Report/BookXchange Team/Inventory by Day/Data Processing Version", pattern="*.xlsx", full.names=TRUE)
+inventory_day <- lapply(inventory_day_file, read_xlsx)
+for (i in 1:length(inventory_day)){inventory_day[[i]]<-cbind(inventory_day[[i]],inventory_day_file[i])}
+inventory_day_all <- do.call("rbind", inventory_day) 
+
+inventory_day_all$`inventory_day_file[i]` <- NULL
+
+inventory_day_all$report_date <- as.Date(inventory_day_all$report_date)
+
+inventory_day_all$amz_sessions <- 0
+inventory_day_all$amz_pageviews <- 0
+inventory_day_all$buybox_percentage <- 0
+inventory_day_all$amz_orders <- 0
+inventory_day_all$amz_sales <- 0
+
+inventory_day_all <- inventory_day_all %>% 
+  filter(!report_date %in% Sys.Date())
+
+```
+
+```{r all orders}
+all_orders_mth_file <- list.files("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Raw Data/Amazon_Raw/All_Orders", pattern="*.txt", full.names=TRUE)
+all_orders_mth <- lapply(all_orders_mth_file, read.delim, header=TRUE, sep="\t")
+for (i in 1:length(all_orders_mth)){all_orders_mth[[i]] <- cbind(all_orders_mth[[i]],all_orders_mth_file[i])}
+all_orders_mth_all <- do.call("rbind", all_orders_mth) 
+
+all_orders_mth_all <- as.data.frame(all_orders_mth_all)
+
+all_orders_mth_all$`all_orders_mth_file[i]` <- NULL
+library(odbc)
+library(DBI)
+
+con.microsoft.sql <- DBI::dbConnect(odbc::odbc(),
+                      Driver   = "SQL Server",
+                      Server   = "52.86.56.66",
+                      Database = "PROCUREMENTDB",
+                      UID      = "LisaLi",
+                      PWD      = "t4vUByNaANWqszXP",
+                      Port     =  1433)
+
+dbWriteTable(con.microsoft.sql, DBI::SQL("Retail.AmzAllOrders"), as.data.frame(all_orders_mth_all), overwrite = TRUE)
+
+write.csv(all_orders_mth_all, "C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Raw Data/Amazon_Raw/All_Orders/All_Orders_2019-Jan_2020-Jul.csv", row.names = FALSE)
+```
+
+```{r all orders database reading}
+library(odbc)
+
+con.microsoft.sql <- DBI::dbConnect(odbc::odbc(),
+                      Driver   = "SQL Server",
+                      Server   = "52.86.56.66",
+                      Database = "BookXCenterProduction",
+                      UID      = "LisaLi",
+                      PWD      = "t4vUByNaANWqszXP",
+                      Port     =  1433)
+
+list_tables_bxc_prod <- dbListTables(con.microsoft.sql)
+
+library(odbc)
+
+con.microsoft.sql <- DBI::dbConnect(odbc::odbc(),
+                      Driver   = "SQL Server",
+                      Server   = "52.86.56.66",
+                      Database = "PROCUREMENTDB",
+                      UID      = "LisaLi",
+                      PWD      = "t4vUByNaANWqszXP",
+                      Port     =  1433)
+
+list_tables_prod <- dbListTables(con.microsoft.sql)
+
+
+write.csv(list_tables_bxc_prod, "C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/ist_tables_bxc_prod.csv", row.names = FALSE)
+write.csv(list_tables_prod, "C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/list_tables_prod.csv", row.names = FALSE)
+
+all_orders_sql <- dbSendQuery(con.microsoft.sql, "SELECT * from BookXCenterProduction.SAP.InventoryReportView")
+inventory_sap <- dbFetch(inventory_sap_sql)
+```
+
+```{r all orders database loading}
+library(odbc)
+
+con.microsoft.sql <- DBI::dbConnect(odbc::odbc(),
+                      Driver   = "SQL Server",
+                      Server   = "52.86.56.66",
+                      Database = "BookXCenterProduction",
+                      UID      = "LisaLi",
+                      PWD      = "t4vUByNaANWqszXP",
+                      Port     =  1433)
+
+all_orders_sql <- dbSendQuery(con.microsoft.sql, "SELECT t.Sku 
+                                                        ,CONVERT(VARCHAR(10), t.PurchaseDate, 111) AS PurchaseDate
+	                                                      ,CONVERT(VARCHAR(10), DATEADD(DD,-(DATEPART(DW,t.PurchaseDate)-7),t.PurchaseDate),111) AS PurchaseWk
+                                                        ,UPPER(t.OrderStatus) AS OrderStatus
+                                                        ,UPPER(t.FulfillmentChannel) AS FulfillmentChannel
+                                                        ,UPPER(t.ShipServiceLevel) AS ShipServiceLevel
+                                                        ,UPPER(t.ProductName) AS ProductName
+                                                        ,SUM(t.Quantity) AS Quantity
+                                                        ,ROUND(SUM(t.ItemPrice),2) AS ItemPrice
+                                                   FROM [BookXCenterProduction].[Data].[FlatFileOrdersByOrderDate] t
+                                               GROUP BY t.Sku
+                                                       ,t.PurchaseDate
+	                                                     ,t.ProductName
+                                                       ,t.OrderStatus
+                                                       ,t.FulfillmentChannel
+                                                       ,t.ShipServiceLevel")
+all_orders <- dbFetch(all_orders_sql)
+
+```
+
+```{r add velocity in}
+daily_sale_path <- file.info(list.files("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Raw Data/Amazon_Raw/Daily_Amazon_Sale", full.names = T))
+daily_sale_name <- rownames(daily_sale_path)[which.max(daily_sale_path$mtime)]
+
+daily_sale <- read.csv(daily_sale_name)
+daily_sale$Ordered.Product.Sales = as.numeric(gsub("[//$,]", "", daily_sale$Ordered.Product.Sales))
+daily_sale$Buy.Box.Percentage = as.numeric(gsub("[//%,]", "", daily_sale$Buy.Box.Percentage))
+daily_sale$Buy.Box.Percentage = daily_sale$Buy.Box.Percentage*0.01
+daily_sale[,c(5,7,10,13)] <- lapply(daily_sale[,c(5,7,10,13)], function(x) as.numeric(gsub("//,", "", as.character(x))))
+
+daily_sale <- daily_sale[,c(3:5,7,9,10,12)]
+daily_sale <- daily_sale %>% 
+  left_join(sku_list, by = c("SKU"="sku")) %>% 
+  mutate(isbn_raw = ifelse(is.na(isbn) & startsWith(SKU, "97"), substr(SKU, start = 1, stop = 13), isbn),
+         isbn_new = ifelse(is.na(isbn_raw), `ï...Parent..ASIN`, isbn_raw))
+
+daily_sale$isbn <- NULL
+daily_sale$isbn_raw <- NULL  
+daily_sale$category <- NULL
+daily_sale$SKU <- NULL
+daily_sale$Title <- NULL
+
+daily_sale <- daily_sale[,c(6,4,5)] %>% 
+  mutate(velocity = Units.Ordered/5)
+
+daily_sale <- daily_sale[,c(1,4)]
+
+daily_sale$isbn_new <- as.numeric(daily_sale$isbn_new)
+inventory_report_aw <- inventory_report_aw %>% 
+  left_join(daily_sale, by = c("item_no"= "isbn_new"))
+
+inventory_report_aw[,c(7)][is.na(inventory_report_aw[,c(7)])] <- 0
+
+inventory_report_tr <- inventory_report_tr %>% 
+  left_join(daily_sale, by = c("item_no"= "isbn_new"))
+
+inventory_report_tr[,c(5)][is.na(inventory_report_tr[,c(5)])] <- 0
+```
+
+```{r add sale information in}
+daily_sale_path <- file.info(list.files("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Raw Data/Amazon_Raw/Daily_Amazon_Sale", full.names = T))
+daily_sale_name <- rownames(daily_sale_path)[which.max(daily_sale_path$mtime)]
+
+daily_sale <- read.csv(daily_sale_name)
+daily_sale$Ordered.Product.Sales = as.numeric(gsub("[//$,]", "", daily_sale$Ordered.Product.Sales))
+daily_sale$Buy.Box.Percentage = as.numeric(gsub("[//%,]", "", daily_sale$Buy.Box.Percentage))
+daily_sale$Buy.Box.Percentage = daily_sale$Buy.Box.Percentage*0.01
+daily_sale[,c(5,7,10,13)] <- lapply(daily_sale[,c(5,7,10,13)], function(x) as.numeric(gsub("//,", "", as.character(x))))
+
+daily_sale <- daily_sale[,c(3:5,7,9,10,12)]
+daily_sale <- daily_sale %>% 
+  left_join(sku_list, by = c("SKU"="sku")) %>% 
+  mutate(isbn_raw = ifelse(is.na(isbn) & startsWith(SKU, "97"), substr(SKU, start = 1, stop = 13), isbn),
+         isbn_new = ifelse(is.na(isbn_raw), `ï...Parent..ASIN`, isbn_raw))
+
+daily_sale$isbn <- NULL
+daily_sale$isbn_raw <- NULL  
+daily_sale$category <- NULL
+daily_sale$SKU <- NULL
+daily_sale$Title <- NULL
+
+inventory_total <- inventory_total %>% 
+  left_join(daily_sale, by = c("item_no" = "isbn_new"))
+
+colnames(inventory_total) <- c("item_no", "item_desc", "instock_inventory", "item_price", "instock_value","warehouse_instock", "amazon_instock", "category", "report_date", "amz_sessions", "amz_pageviews", "buybox_percentage", "amz_orders", "amz_sales")
+
+inventory_total[,c(10:14)][is.na(inventory_total[,c(10:14)])] <- 0
+
+inventory_day_all <- read_xlsx("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Reports/Inventory Report/BookXchange Team/Inventory by Day/Inventory_Reports_Raw.xlsx", sheet = 1)
+
+inventory_day_all <- rbind(inventory_day_all, inventory_total)
+
+inventory_day_all$report_date <- as.Date(inventory_day_all$report_date)
+
+```
+
+```{r temp file for sql}
+red_flag_isbns <- read_xlsx("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Reports/Temp Files/Red_Flag_ISBNs.xlsx", sheet = 1)
+red_flag_isbns$quantity <- NULL
+no_wsale_isbns <- read_xlsx("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Reports/Temp Files/FBM_Shipment.xlsx", sheet = 1)
+```
+
+```{r inventory analysis data cleaning}
+library(readxl)
+library(dplyr)
+
+path_to_workbook <- "C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Ad Hoc/Inventory Aging Analysis/2019-09-30_2020-08-31.xlsx"
+inventory_age_12months<- bind_rows(path_to_workbook %>%
+                             excel_sheets() %>%
+                             set_names() %>%
+                             map(read_excel, path = path_to_workbook))
+
+inventory_age_12months$`Item No.` <- as.character(inventory_age_12months$`Item No.`)
+
+inventory_age_12months$`Item Description` <- lapply(inventory_age_12months$`Item Description`, tolower)
+inventory_age_12months$`Item Description` <- gsub("[[:punct:]]", "", inventory_age_12months$`Item Description`)
+inventory_age_12months$`Item Description` <- gsub("[][!#$%()*,.:;<=>@^_`|~.{}]", "", inventory_age_12months$`Item Description`)
+inventory_age_12months$`Item Description` <- gsub("[[:digit:]]+", "", inventory_age_12months$`Item Description`)
+
+inventory_age_12months$`Item Description` <- gsub(" *\\b[[:alpha:]]{1,2}\\b *", " ", inventory_age_12months$`Item Description`) 
+inventory_age_12months$`Item Description` <- trimws(inventory_age_12months$`Item Description`)
+inventory_age_12months$`Item Description` <- gsub(' +',' ',inventory_age_12months$`Item Description`) 
+
+CapStr <- function(y) {
+  c <- strsplit(y, " ")[[1]]
+  paste(toupper(substring(c, 1,1)), substring(c, 2),
+        sep="", collapse=" ")
+}
+inventory_age_12months$`Item Description` <- sapply(inventory_age_12months$`Item Description`, CapStr)
+
+inventory_age_12months$`Batch No.` <- lapply(inventory_age_12months$`Batch No.`, toupper)
+
+inventory_age_12months$`Batch No.` <- as.character(inventory_age_12months$`Batch No.`)
+write_xlsx(list("Inventory Raw" = inventory_age_12months),"C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Ad Hoc/Inventory Aging Analysis/Inventory Aging Analysis.xlsx")
+```
+
+```{r ISBN information pull}
+library(odbc)
+
+con.microsoft.sql <- DBI::dbConnect(odbc::odbc(),
+                      Driver   = "SQL Server",
+                      Server   = "52.86.56.66",
+                      Database = "BookXCenterProduction",
+                      UID      = "LisaLi",
+                      PWD      = "t4vUByNaANWqszXP",
+                      Port     =  1433)
+
+isbn_list_pull <- dbSendQuery(con.microsoft.sql, "SELECT t.Isbn AS isbn, NULLIF(t.Publisher,'') AS publisher FROM BookXCenterProduction.Isbn.Bibliography t")
+isbn_list_full <- dbFetch(isbn_list_pull)
+
+isbn_list_full$publisher <- lapply(isbn_list_full$publisher, tolower)
+isbn_list_full$publisher <- gsub("[[:punct:]]", "", isbn_list_full$publisher)
+isbn_list_full$publisher <- gsub("[][!#$%()*,.:;<=>@^_`|~.{}]", "", isbn_list_full$publisher)
+isbn_list_full$publisher <- gsub("[[:digit:]]+", "", isbn_list_full$publisher)
+
+isbn_list_full$publisher <- gsub(" *\\b[[:alpha:]]{1,2}\\b *", " ", isbn_list_full$publisher) 
+isbn_list_full$publisher <- trimws(isbn_list_full$publisher)
+# isbn_list_full$publisher <- gsub("\\s+", "_", isbn_list_full$publisher)
+isbn_list_full$publisher <- gsub(' +',' ',isbn_list_full$publisher) 
+
+CapStr <- function(y) {
+  c <- strsplit(y, " ")[[1]]
+  paste(toupper(substring(c, 1,1)), substring(c, 2),
+        sep="", collapse=" ")
+}
+
+isbn_list_full$publisher <- sapply(isbn_list_full$publisher, CapStr)
+
+isbn_list_full_filter <- isbn_list_full %>% 
+  filter(!publisher %in% "")
+
+isbn_list_full_filter$isbn <- as.numeric(isbn_list_full_filter$isbn)
+inventory_report_aw <- inventory_report_aw %>% 
+  left_join(isbn_list_full_filter, by = c("item_no" = "isbn"))
+
+inventory_report_aw <- inventory_report_aw %>% 
+  arrange(publisher) %>% 
+  distinct(item_no,.keep_all = TRUE)
+
+inventory_report_tr <- inventory_report_tr %>% 
+  left_join(isbn_list_full_filter, by = c("item_no" = "isbn"))
+
+inventory_report_tr <- inventory_report_tr %>% 
+  arrange(publisher) %>% 
+  distinct(item_no,.keep_all = TRUE)
+
+# write_xlsx(list("ISBN Publisher" = isbn_list_full_filter), "C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Ad Hoc/Ad Hoc_Raw/Competitors Research/ISBN Publisher.xlsx")
+```
+
+```{r due date report - weekly}
+due_date_raw <- lpoo_list %>% 
+  filter(WhsCode %in% c("AW", "TR"),
+         !`OpenQuantity` %in% 0) %>% 
+  mutate(total_value = `OpenQuantity`*`USDUnitPrice`,
+         due_date = date(`DueAtBXC`),
+         due_year = year(`DueAtBXC`),
+         due_month = month(`DueAtBXC`))%>% 
+  select(`Isbn`,`BPName`, WhsCode,`OpenQuantity`, `USDUnitPrice`, total_value, due_date, due_year, due_month)
+
+colnames(due_date_raw) <- c("item_no","BP_name","Whse","open_quantity","unit_price_usd","total_value","due_date","due_year", "due_month")
+
+write.csv(due_date_raw, "C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting//Reports/Due Date Report/Due_Date_Raw.csv", row.names = FALSE)
+
+con.microsoft.sql <- DBI::dbConnect(odbc::odbc(),
+                     Driver   = "SQL Server",
+                     Server   = "52.86.56.66",
+                     Database = "PROCUREMENTDB",
+                     UID      = "LisaLi",
+                     PWD      = "t4vUByNaANWqszXP",
+                     Port     =  1433)
+
+dbWriteTable(con.microsoft.sql, DBI::SQL("Retail.DueDateRaw"), as.data.frame(due_date_raw), overwrite = TRUE)
+```
+
+```{r red flag ISBNs}
+red_flag <- read_xlsx("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Reports/Temp Files/Red_Flag_ISBNs_2020-10-30.xlsx", sheet = 1)
+keepa_data <- read_xlsx("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Raw Data/Keepa_Raw/Temp ISBNs/Keepa_ASIN_Export.2020_10_30.1375_products.xlsx", sheet = 1)
+# session_data <- read.csv("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Raw Data/Amazon_Raw/SKU_Monthly_Manual_Raw/BusinessReport-11-2-20.csv")
+
+
+keepa_data <- keepa_data %>% 
+  select(`Product Codes: EAN`, ASIN, `Buy Box: Current`, `Buy Box: 30 days avg.`, `Sales Rank: Current`, `Publication Date`, `Buy Box Seller`, `New Offer Count: Current`)
+
+colnames(keepa_data) <- c("isbn", "asin", "buybox_current", "buybox_30day_avg", "sale_rank_current", "publication_date", "buy_box_seller", "new_offer_count")
+
+keepa_data$publication_date <- as.Date(keepa_data$publication_date)
+library(stringr)
+keepa_data <- str_split_fixed(keepa_data$isbn, ",", 5) %>% 
+  cbind(keepa_data)
+
+tbl_vars(keepa_data)
+
+colnames(keepa_data) <- c("V1","V2","V3","V4","V5","isbn", "asin", "buybox_current", "buybox_30day_avg", "sale_rank_current", "publication_date", "buy_box_seller", "new_offer_count")
+
+keepa_data <- keepa_data %>% 
+  mutate(isbn_new =  ifelse(startsWith(V2, " 97"), V2, 
+                            ifelse(startsWith(V3, " 97"), V3, 
+                                   ifelse(startsWith(V4, " 97"), V4,
+                                          ifelse(startsWith(V5, " 97"), V5, V1))))) %>% 
+  select("isbn_new", "asin", "buybox_current", "buybox_30day_avg", "sale_rank_current", "publication_date","buy_box_seller", "new_offer_count") 
+
+keepa_data$buybox_current <- as.numeric(gsub("[\\$,]", "",keepa_data$buybox_current))
+keepa_data$buybox_30day_avg <- as.numeric(gsub("[\\$,]", "",keepa_data$buybox_30day_avg))
+
+keepa_data$isbn_new <- trimws(keepa_data$isbn_new)
+
+keepa_data <- keepa_data %>% 
+  arrange(buybox_30day_avg) %>% 
+  distinct(isbn_new,.keep_all = TRUE)
+
+red_flag$ISBN <- as.character(red_flag$ISBN)
+
+today_inventory <- inventory_day_all %>% 
+  filter(report_date == Sys.Date())
+red_flag_comment <- red_flag %>% 
+  left_join(keepa_data, by = c("ISBN"= "isbn_new")) %>% 
+  left_join(today_inventory, by = c("ISBN" = "item_no")) %>% 
+  filter(!is.na(report_date))
+
+sessions <- sku_orders_wk_price %>% 
+  filter(order_year == "2020",
+         order_week >= 31) %>% 
+  group_by(Isbn) %>% 
+  summarise(sessions = sum(amz_sessions),
+            pageview = sum(amz_pageviews),
+            units_sold = sum(amz_units))
+
+red_flag_comment <- red_flag_comment %>% 
+  left_join(sessions, by = c("ISBN" = "Isbn")) 
+
+red_flag_comment[,c(19:21)][is.na(red_flag_comment[,c(19:21)])] <- 0
+  
+red_flag_comment <- red_flag_comment %>% 
+  mutate(comment = ifelse(GROUP %in% c("181-300 Days","301-450 Days", "451-630 Days") & sessions == 0, "Any Price: Any channel",
+                          ifelse(GROUP %in% c("181-300 Days","301-450 Days", "451-630 Days") & sessions != 0, "Lower Pice: Amazon/BS",
+                                 ifelse(GROUP %in% c("90-180 Days") & sessions == 0, "Aug Rush Book - Lower Price: Amazon/BS",
+                                                     ifelse(GROUP %in% c("90-180 Days") & sessions != 0 & instock_inventory <= 100, "Aug Rush Book - Same Price Str: Amazon", "Aug Rush Book - Lower Price: Amazon/BS")))))
+
+write.csv(red_flag_comment, "C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Reports/Temp Files/Red_Flag_Str.csv")
+```
+
